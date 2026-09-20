@@ -1,0 +1,16 @@
+__pycache__/
+.venv/
+.env
+.pytest_cache/
+node_modules/
+.next/
+data/raw/*
+data/processed/*
+models/*.pt
+models/*.onnx
+reports/plots/*
+
+*.log
+*.err
+
+.env.local

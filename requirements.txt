@@ -1,0 +1,15 @@
+numpy
+pandas
+scipy
+matplotlib
+plotly
+scikit-learn
+torch
+deepxde
+fastapi
+uvicorn[standard]
+pydantic
+pytest
+httpx
+onnx
+onnxruntime
