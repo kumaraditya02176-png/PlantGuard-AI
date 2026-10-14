@@ -1,6 +1,6 @@
 "use client"
 
-import { FormEvent, useEffect, useMemo, useState } from "react"
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import {
   Area,
   AreaChart,
@@ -27,10 +27,12 @@ type Dashboard = {
     time_s: number
     active_scenario: { type: string } | null
     latest_sensor: Sensor
+    sensor_history?: Sensor[]
     controls: Record<string, number>
   }
   risk: {
     risk: RiskMap
+    risk_bands?: Record<keyof RiskMap, string>
     overall_risk: number
     risk_band: string
     lead_time_estimate_s: number
@@ -40,7 +42,25 @@ type Dashboard = {
       lstm_risk: ModelRisk | null
     }
   }
-  advisory: any
+  advisory: {
+    defect: string
+    severity: string
+    risk: number
+    overall_risk: number
+    recommended_action: string
+    reason: string
+    target_process_variable: string
+    suggested_adjustment: number
+    duration_s: number
+  }
+  correction_result?: {
+    simulated: boolean
+    defect: string
+    target_process_variable: string
+    duration_s: number
+    before: { sensor_value: number; defect_risk: number; overall_risk: number }
+    after: { sensor_value: number; defect_risk: number; overall_risk: number }
+  }
   notice: string
 }
 
@@ -179,9 +199,12 @@ export default function Home() {
   const [history, setHistory] = useState<Sensor[]>([])
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null)
   const [roiResult, setRoiResult] = useState<RoiEstimate | null>(null)
+  const [correctionResult, setCorrectionResult] = useState<Dashboard["correction_result"] | null>(null)
   const [selectedScenario, setSelectedScenario] = useState("normal")
   const [busy, setBusy] = useState<string | null>(null)
   const [message, setMessage] = useState("Loading live data…")
+  const commandInProgress = useRef(false)
+  const requestVersion = useRef(0)
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`${API}${path}`, {
@@ -196,23 +219,29 @@ export default function Home() {
   }
 
   async function refresh() {
+    if (commandInProgress.current) return
+    const version = ++requestVersion.current
     try {
       const [dash, hist, modelMetrics] = await Promise.all([
         request<Dashboard>("/api/v1/dashboard"),
         request<{ readings: Sensor[] }>("/api/v1/sensors/history?limit=90"),
         request<MetricsResponse>("/api/v1/metrics"),
       ])
+      if (version !== requestVersion.current || commandInProgress.current) return
 
       setDashboard(dash)
-      setHistory(hist.readings)
+      setHistory(dash.simulation.sensor_history ?? hist.readings)
       setMetrics(modelMetrics)
-      setSelectedScenario(dash.simulation.active_scenario?.type ?? selectedScenario)
+      setSelectedScenario(dash.simulation.active_scenario?.type ?? "normal")
       setMessage("Live data loaded")
 
       const roi = await request<RoiResponse>("/api/v1/roi")
+      if (version !== requestVersion.current || commandInProgress.current) return
       setRoiResult(roi.illustrative_estimate)
     } catch (e: any) {
-      setMessage(e?.message ?? "Failed to load data")
+      if (version === requestVersion.current && !commandInProgress.current) {
+        setMessage(e?.message ?? "Failed to load data")
+      }
     }
   }
 
@@ -223,25 +252,34 @@ export default function Home() {
   }, [])
 
   async function command(key: string, path: string, body?: object) {
+    if (commandInProgress.current) return
+    commandInProgress.current = true
+    const version = ++requestVersion.current
     setBusy(key)
     try {
       const dash = await request<Dashboard>(path, { method: "POST", body: JSON.stringify(body ?? {}) })
-      setDashboard(dash)
       const hist = await request<{ readings: Sensor[] }>("/api/v1/sensors/history?limit=90")
-      setHistory(hist.readings)
-      setSelectedScenario(dash.simulation.active_scenario?.type ?? selectedScenario)
+      if (version !== requestVersion.current) return
+      setDashboard(dash)
+      setHistory(dash.simulation.sensor_history ?? hist.readings)
+      setSelectedScenario(dash.simulation.active_scenario?.type ?? "normal")
+      if (key.startsWith("scenario-")) setCorrectionResult(null)
+      if (key === "apply") setCorrectionResult(dash.correction_result ?? null)
       setMessage("Command applied")
       const latestRoi = await request<RoiResponse>("/api/v1/roi")
+      if (version !== requestVersion.current) return
       setRoiResult(latestRoi.illustrative_estimate)
     } catch (e: any) {
-      setMessage(e?.message ?? "Command failed")
+      if (version === requestVersion.current) setMessage(e?.message ?? "Command failed")
     } finally {
-      setBusy(null)
+      if (version === requestVersion.current) {
+        commandInProgress.current = false
+        setBusy(null)
+      }
     }
   }
 
   async function handleScenarioSelect(scenario: string) {
-    setSelectedScenario(scenario)
     await command(`scenario-${scenario}`, "/api/v1/simulation/reset", { scenario })
   }
 
@@ -276,9 +314,9 @@ export default function Home() {
   const recommendedAction = advisory?.recommended_action ?? "Monitor process conditions"
   const advisoryReason = advisory?.reason ?? "No defect signal detected."
   const riskCards = [
-    { key: "surface_cracking", label: "Surface cracking", value: risk?.risk.surface_cracking ?? 0 },
-    { key: "warping", label: "Warping", value: risk?.risk.warping ?? 0 },
-    { key: "thickness_non_uniformity", label: "Thickness variation", value: risk?.risk.thickness_non_uniformity ?? 0 },
+    { key: "surface_cracking", label: "Surface cracking", value: risk?.risk.surface_cracking ?? 0, band: risk?.risk_bands?.surface_cracking },
+    { key: "warping", label: "Warping", value: risk?.risk.warping ?? 0, band: risk?.risk_bands?.warping },
+    { key: "thickness_non_uniformity", label: "Thickness variation", value: risk?.risk.thickness_non_uniformity ?? 0, band: risk?.risk_bands?.thickness_non_uniformity },
   ]
 
   const roiFormDefaults = {
@@ -489,10 +527,10 @@ export default function Home() {
                 <strong>{formatPercent(riskCard.value)}</strong>
               </div>
               <div className="progress-bar">
-                <span style={{ width: `${Math.round(riskCard.value * 100)}%`, background: getRiskBand(riskCard.value) === "high" ? "linear-gradient(90deg, #ff7b6b, #ffb26b)" : getRiskBand(riskCard.value) === "moderate" ? "linear-gradient(90deg, #fbbf24, #f59e0b)" : "linear-gradient(90deg, #34d399, #2dd4bf)" }} />
+                <span style={{ width: `${Math.round(riskCard.value * 100)}%`, background: (riskCard.band ?? getRiskBand(riskCard.value)) === "high" ? "linear-gradient(90deg, #ff7b6b, #ffb26b)" : (riskCard.band ?? getRiskBand(riskCard.value)) === "moderate" ? "linear-gradient(90deg, #fbbf24, #f59e0b)" : "linear-gradient(90deg, #34d399, #2dd4bf)" }} />
               </div>
-              <div className={`risk-tag ${getRiskBand(riskCard.value)}`}>
-                {getRiskBand(riskCard.value)}
+              <div className={`risk-tag ${riskCard.band ?? getRiskBand(riskCard.value)}`}>
+                {riskCard.band ?? getRiskBand(riskCard.value)}
               </div>
             </div>
           ))}
@@ -524,11 +562,11 @@ export default function Home() {
 
             <div className="advisory-stats">
               <div>
-                <span>Risk</span>
+                <span>Defect-specific risk</span>
                 <strong>{advisory ? formatPercent(advisory.risk ?? riskValue) : "--"}</strong>
               </div>
               <div>
-                <span>Severity</span>
+                <span>Defect-risk severity</span>
                 <strong>{(advisory?.severity ?? getRiskBand(riskValue)).toUpperCase()}</strong>
               </div>
             </div>
@@ -554,11 +592,37 @@ export default function Home() {
               <span>Suggested duration</span>
               <strong>{advisory ? `${advisory.duration_s ?? 45}s` : "45s"}</strong>
             </div>
-            <button className="primary-btn" onClick={() => void handleApplyAdvice()} disabled={busy === "apply"}>
+            <button className="primary-btn" onClick={() => void handleApplyAdvice()} disabled={busy !== null}>
               {busy === "apply" ? "Applying…" : "Simulate correction"}
             </button>
           </aside>
         </div>
+        {correctionResult && (
+          <div className="lead-window" aria-live="polite">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Simulated correction result</p>
+                <h3>{correctionResult.defect.replaceAll("_", " ")} · {correctionResult.target_process_variable.replaceAll("_", " ")}</h3>
+              </div>
+              <span className="section-pill">Finite duration: {correctionResult.duration_s}s</span>
+            </div>
+            <div className="advisory-stats">
+              <div>
+                <span>Sensor reading</span>
+                <strong>{correctionResult.before.sensor_value.toFixed(2)} → {correctionResult.after.sensor_value.toFixed(2)}</strong>
+              </div>
+              <div>
+                <span>Target defect risk</span>
+                <strong>{formatPercent(correctionResult.before.defect_risk)} → {formatPercent(correctionResult.after.defect_risk)}</strong>
+              </div>
+              <div>
+                <span>Overall risk</span>
+                <strong>{formatPercent(correctionResult.before.overall_risk)} → {formatPercent(correctionResult.after.overall_risk)}</strong>
+              </div>
+            </div>
+            <p className="advisory-reason">Immediate simulated response only; scenario dynamics continue. Total risk is not guaranteed to improve. No real equipment is controlled.</p>
+          </div>
+        )}
       </section>
 
       <section className="panel lab-panel" id="lab">
@@ -578,6 +642,8 @@ export default function Home() {
               type="button"
               className={`scenario-card ${selectedScenario === key ? "selected" : ""}`}
               onClick={() => void handleScenarioSelect(key)}
+              disabled={busy !== null}
+              aria-pressed={selectedScenario === key}
             >
               <span>{label}</span>
               <small>{key === "normal" ? "Baseline" : "Defect mode"}</small>
@@ -586,7 +652,7 @@ export default function Home() {
         </div>
 
         <div className="lab-footer">
-          <button className="primary-btn" onClick={() => void handleAdvanceSimulation()} disabled={busy === "advance"}>
+          <button className="primary-btn" onClick={() => void handleAdvanceSimulation()} disabled={busy !== null}>
             {busy === "advance" ? "Advancing…" : "Advance simulation"}
           </button>
           <p>All buttons update a contained mathematical simulation. No real-world machinery is connected.</p>
@@ -614,9 +680,9 @@ export default function Home() {
         {dashboard?.risk.model_comparison && (
           <div className="metrics-meta">
             <span>
-              Live LSTM comparator: {dashboard.risk.model_comparison.lstm_status === "active"
+              PINN drives dashboard and advisory risk. LSTM is a separate live comparator: {dashboard.risk.model_comparison.lstm_status === "active"
                 ? `${formatPercent(dashboard.risk.model_comparison.lstm_risk?.overall_risk ?? 0)} overall risk`
-                : "warming up"}
+                : "warming up until eight readings are available"}
             </span>
           </div>
         )}

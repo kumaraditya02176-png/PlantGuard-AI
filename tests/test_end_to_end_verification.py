@@ -243,6 +243,20 @@ def test_risk_and_advisory_share_band_boundaries(value, expected):
     assert advisory_from_risk("surface_cracking", value, {})["severity"] == expected
 
 
+def test_model_risk_bands_use_shared_thresholds_at_float32_edges(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "_predict_models",
+        lambda _: {"pinn": np.asarray([0.65, 0.35, 0.70], dtype=np.float32), "lstm": None},
+    )
+    risk = main_module._build_risk_payload({})
+    assert risk["risk_bands"] == {
+        "surface_cracking": "high",
+        "warping": "moderate",
+        "thickness_non_uniformity": "high",
+    }
+
+
 def test_pinn_physics_targets_match_documented_synthetic_teacher_at_nominal_and_defect_states():
     model = PINNModel()
     cases = [
@@ -296,11 +310,21 @@ def test_api_dashboard_advisory_use_cached_pinn_and_lstm_warms_up(monkeypatch):
     reset = client.post("/api/v1/simulation/reset", json={"scenario": "overheating"})
     assert reset.status_code == 200
     dashboard = reset.json()
+    assert dashboard["simulation"]["active_scenario"]["type"] == "overheating"
+    assert dashboard["simulation"]["sensor_history"][-1] == dashboard["simulation"]["latest_sensor"]
     expected_pinn, expected_lstm = _expected_api_model_risks(main_module.simulator)
     assert dashboard["risk"]["risk"]["surface_cracking"] == pytest.approx(expected_pinn["surface_cracking"])
     assert dashboard["risk"]["risk"]["warping"] == pytest.approx(expected_pinn["warping"])
     assert dashboard["risk"]["risk"]["thickness_non_uniformity"] == pytest.approx(expected_pinn["thickness_variation"])
     assert dashboard["risk"]["overall_risk"] == pytest.approx(expected_pinn["overall_risk"])
+    defect_key = dashboard["advisory"]["defect"]
+    risk_key = {
+        "surface_cracking": "surface_cracking",
+        "warping": "warping",
+        "thickness_variation": "thickness_non_uniformity",
+    }[defect_key]
+    assert dashboard["advisory"]["risk"] == pytest.approx(dashboard["risk"]["risk"][risk_key])
+    assert dashboard["advisory"]["severity"] == dashboard["risk"]["risk_bands"][risk_key]
     assert dashboard["risk"]["model_comparison"]["lstm_status"] == "warming_up"
     assert dashboard["risk"]["model_comparison"]["lstm_risk"] is None
 
@@ -371,6 +395,60 @@ def test_model_backed_api_advisory_beats_matched_control(scenario, monkeypatch):
         f"{control_target_risk:.6f} matched-control risk; overall was "
         f"{corrected_risk:.6f} versus {control_risk:.6f}"
     )
+
+
+@pytest.mark.parametrize("scenario", ["overheating", "feed_rate_instability"])
+def test_api_repeated_correction_is_idempotent_and_reports_before_after(scenario, monkeypatch):
+    simulator = ExtrusionSimulator(scenario)
+    monkeypatch.setattr(main_module, "simulator", simulator)
+    pinn_prediction = (
+        np.asarray([0.95, 0.2, 0.3], dtype=np.float32)
+        if scenario == "overheating"
+        else np.asarray([0.2, 0.2, 0.95], dtype=np.float32)
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_predict_models",
+        lambda _: {"pinn": pinn_prediction, "lstm": None},
+    )
+    client = TestClient(app)
+    baseline = client.post("/api/v1/simulation/reset", json={"scenario": scenario}).json()
+    first = client.post("/api/v1/advisories/apply").json()
+    correction = first["correction_result"]
+    target = correction["target_process_variable"]
+    expected_target = "temperature_c" if scenario == "overheating" else "feed_rate_kg_h"
+
+    assert correction["simulated"] is True
+    assert target == expected_target
+    assert correction["duration_s"] > 0
+    assert correction["before"]["sensor_value"] == pytest.approx(
+        baseline["simulation"]["latest_sensor"][target]
+    )
+    assert correction["after"]["sensor_value"] == pytest.approx(
+        first["simulation"]["latest_sensor"][target]
+    )
+    assert correction["before"]["overall_risk"] == pytest.approx(baseline["risk"]["overall_risk"])
+    assert correction["after"]["overall_risk"] == pytest.approx(first["risk"]["overall_risk"])
+    assert correction["after"]["defect_risk"] == pytest.approx(
+        first["risk"]["risk"][{
+            "surface_cracking": "surface_cracking",
+            "warping": "warping",
+            "thickness_variation": "thickness_non_uniformity",
+        }[correction["defect"]]]
+    )
+
+    original_setpoints = dict(simulator._correction_setpoints)
+    original_expiry = simulator._correction_expires_at
+    repeated = client.post("/api/v1/advisories/apply").json()
+    assert repeated["simulation"]["latest_sensor"] == first["simulation"]["latest_sensor"]
+    assert simulator._correction_setpoints == original_setpoints
+    assert simulator._correction_expires_at == original_expiry
+    assert repeated["correction_result"]["before"]["sensor_value"] == pytest.approx(
+        repeated["correction_result"]["after"]["sensor_value"]
+    )
+    assert SENSOR_BOUNDS[target][0] <= repeated["simulation"]["latest_sensor"][target] <= SENSOR_BOUNDS[target][1]
+    if target == "feed_rate_kg_h":
+        assert repeated["simulation"]["latest_sensor"][target] >= SCENARIO_PROFILES["normal"]["feed_rate_kg_h"]
 
 
 def test_advisory_generation_and_simulated_correction():
@@ -548,3 +626,8 @@ def test_frontend_files_and_build_contract():
     assert "ROI" in page_text
     assert "False alarm rate" not in page_text
     assert "Per-label accuracy" not in page_text
+    assert "Defect-specific risk" in page_text
+    assert "PINN drives dashboard and advisory risk" in page_text
+    assert "commandInProgress" in page_text
+    assert "requestVersion" in page_text
+    assert "Total risk is not guaranteed to improve" in page_text

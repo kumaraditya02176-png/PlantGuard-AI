@@ -262,6 +262,12 @@ class ExtrusionSimulator:
         target = advisory.get("target_process_variable", "temperature_c")
         if target not in CORRECTION_LIMITS:
             raise ValueError(f"Unsupported advisory target: {target!r}")
+        if (
+            target in self._correction_setpoints
+            and self.time_s <= self._correction_expires_at
+        ):
+            return self.current_state()
+
         minimum_adjustment, maximum_adjustment, _ = CORRECTION_LIMITS[target]
         adjustment = float(advisory.get("suggested_adjustment", 0.0))
         adjustment = max(minimum_adjustment, min(adjustment, maximum_adjustment))

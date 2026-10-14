@@ -14,9 +14,10 @@ LSTM_TRAINING_EPOCHS = 100
 
 
 def risk_band_for_value(value: float) -> str:
-    if value < RISK_BAND_THRESHOLDS["low"]:
+    normalized_value = round(float(value), 6)
+    if normalized_value < RISK_BAND_THRESHOLDS["low"]:
         return "low"
-    if value < RISK_BAND_THRESHOLDS["moderate"]:
+    if normalized_value < RISK_BAND_THRESHOLDS["moderate"]:
         return "moderate"
     return "high"
 
