@@ -189,8 +189,76 @@ def test_advisory_generation_and_simulated_correction():
     after_state = sim.current_state()["sensor"]
     after_risk = compute_risk_from_state(after_state)
     assert after_state != baseline_state
-    assert after_risk["overall_risk"] != before_risk["overall_risk"]
+    assert after_risk["overall_risk"] < before_risk["overall_risk"]
     assert after_risk["lead_time_estimate_s"] != before_risk["lead_time_estimate_s"]
+
+
+def test_advisory_correction_stabilizes_risk_during_its_active_window():
+    expected_defects = {
+        "overheating": "surface_cracking",
+        "feed_rate_instability": "thickness_variation",
+    }
+    risk_inputs = (
+        "temperature_c",
+        "pressure_bar",
+        "feed_rate_kg_h",
+        "vibration_mm_s",
+        "viscosity_pa_s",
+        "thickness_mm",
+        "cooling_efficiency",
+    )
+
+    for scenario, expected_defect in expected_defects.items():
+        sim = ExtrusionSimulator(scenario)
+        before_sensor = sim.current_state()["sensor"]
+        before_risk = compute_risk_from_state(before_sensor)
+        recommendation = generate_advisory_for_state(before_risk, before_sensor)
+        assert recommendation["defect"] == expected_defect
+
+        sim.apply_advisory(recommendation)
+        corrected_sensor = sim.current_state()["sensor"]
+        corrected_risk = compute_risk_from_state(corrected_sensor)
+        assert corrected_risk["overall_risk"] < before_risk["overall_risk"]
+
+        sim.advance(30.0)
+        sustained_sensor = sim.current_state()["sensor"]
+        sustained_risk = compute_risk_from_state(sustained_sensor)
+        assert sustained_risk["overall_risk"] <= corrected_risk["overall_risk"]
+        assert all(sustained_sensor[key] == corrected_sensor[key] for key in risk_inputs)
+        assert sustained_risk["overall_risk"] < before_risk["overall_risk"]
+
+        sim.advance(recommendation["duration_s"] - 30.0)
+        active_end_sensor = sim.current_state()["sensor"]
+        assert all(active_end_sensor[key] == corrected_sensor[key] for key in risk_inputs)
+        assert compute_risk_from_state(active_end_sensor)["overall_risk"] == corrected_risk["overall_risk"]
+
+        sim.advance(1.0)
+        expired_sensor = sim.current_state()["sensor"]
+        assert any(expired_sensor[key] != active_end_sensor[key] for key in risk_inputs)
+        assert 68.0 <= expired_sensor["temperature_c"] <= 110.0
+        assert 35.0 <= expired_sensor["pressure_bar"] <= 85.0
+        assert 700.0 <= expired_sensor["feed_rate_kg_h"] <= 980.0
+        assert 0.8 <= expired_sensor["vibration_mm_s"] <= 5.5
+        assert 60.0 <= expired_sensor["viscosity_pa_s"] <= 100.0
+        assert 1.8 <= expired_sensor["thickness_mm"] <= 3.0
+        assert 0.5 <= expired_sensor["cooling_efficiency"] <= 1.0
+
+
+def test_advisory_adjustment_is_clamped_to_sensor_bounds():
+    sim = ExtrusionSimulator("overheating")
+    sim.apply_advisory({
+        "target_process_variable": "temperature_c",
+        "suggested_adjustment": 1000.0,
+        "duration_s": 10,
+    })
+    assert sim.current_state()["sensor"]["temperature_c"] == 110.0
+
+    sim.apply_advisory({
+        "target_process_variable": "feed_rate_kg_h",
+        "suggested_adjustment": -1000.0,
+        "duration_s": 10,
+    })
+    assert sim.current_state()["sensor"]["feed_rate_kg_h"] == 700.0
 
 
 def test_fastapi_endpoints():

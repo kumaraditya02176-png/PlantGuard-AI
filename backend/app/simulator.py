@@ -4,6 +4,29 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+SENSOR_BOUNDS = {
+    "temperature_c": (68.0, 110.0),
+    "pressure_bar": (35.0, 85.0),
+    "screw_speed_rpm": (80.0, 150.0),
+    "feed_rate_kg_h": (700.0, 980.0),
+    "vibration_mm_s": (0.8, 5.5),
+    "viscosity_pa_s": (60.0, 100.0),
+    "thickness_mm": (1.8, 3.0),
+    "line_speed_m_min": (18.0, 32.0),
+    "cooling_efficiency": (0.5, 1.0),
+}
+
+RISK_INPUTS = (
+    "temperature_c",
+    "pressure_bar",
+    "feed_rate_kg_h",
+    "vibration_mm_s",
+    "viscosity_pa_s",
+    "thickness_mm",
+    "cooling_efficiency",
+)
+
+
 SCENARIO_PROFILES = {
     "normal": {
         "temperature_c": 76.0,
@@ -82,6 +105,8 @@ class ExtrusionSimulator:
     sensor_history: List[Dict[str, float]] = field(default_factory=list)
     event_log: List[str] = field(default_factory=list)
     time_s: float = 0.0
+    _correction_setpoints: Dict[str, float] = field(default_factory=dict, init=False)
+    _correction_expires_at: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
         self.reset(self.scenario)
@@ -91,6 +116,8 @@ class ExtrusionSimulator:
         self.scenario = key if key in SCENARIO_PROFILES else "normal"
         self.defect = None
         self.time_s = 0.0
+        self._correction_setpoints.clear()
+        self._correction_expires_at = 0.0
         self.sensor_history = []
         self.event_log = [f"Scenario reset: {self.scenario}"]
         self.state = {
@@ -125,6 +152,10 @@ class ExtrusionSimulator:
             "history": list(self.sensor_history),
             "event_log": list(self.event_log),
         }
+
+    def _clamp_state(self) -> None:
+        for key, (minimum, maximum) in SENSOR_BOUNDS.items():
+            self.state[key] = max(minimum, min(float(self.state[key]), maximum))
 
     def inject_defect(self, defect: str) -> Dict[str, Any]:
         defect_name = defect.lower()
@@ -199,15 +230,14 @@ class ExtrusionSimulator:
             self.state["feed_rate_kg_h"] += 8.0 * dt
             self.state["thickness_mm"] += 0.03 * dt
 
-        self.state["temperature_c"] = max(68.0, min(self.state["temperature_c"], 110.0))
-        self.state["pressure_bar"] = max(35.0, min(self.state["pressure_bar"], 85.0))
-        self.state["screw_speed_rpm"] = max(80.0, min(self.state["screw_speed_rpm"], 150.0))
-        self.state["feed_rate_kg_h"] = max(700.0, min(self.state["feed_rate_kg_h"], 980.0))
-        self.state["vibration_mm_s"] = max(0.8, min(self.state["vibration_mm_s"], 5.5))
-        self.state["viscosity_pa_s"] = max(60.0, min(self.state["viscosity_pa_s"], 100.0))
-        self.state["thickness_mm"] = max(1.8, min(self.state["thickness_mm"], 3.0))
-        self.state["line_speed_m_min"] = max(18.0, min(self.state["line_speed_m_min"], 32.0))
-        self.state["cooling_efficiency"] = max(0.5, min(self.state["cooling_efficiency"], 1.0))
+        self._clamp_state()
+
+        if self._correction_setpoints:
+            if self.time_s <= self._correction_expires_at:
+                self.state.update(self._correction_setpoints)
+            else:
+                self._correction_setpoints.clear()
+                self._correction_expires_at = 0.0
 
         snapshot = self._sensor_snapshot()
         self.sensor_history.append(snapshot)
@@ -216,6 +246,7 @@ class ExtrusionSimulator:
     def apply_advisory(self, advisory: Dict[str, Any]) -> Dict[str, Any]:
         target = advisory.get("target_process_variable", "temperature_c")
         adjustment = float(advisory.get("suggested_adjustment", 0.0))
+        duration_s = max(0.0, min(float(advisory.get("duration_s", 180.0)), 600.0))
         if target not in self.state:
             target = "temperature_c"
 
@@ -230,6 +261,13 @@ class ExtrusionSimulator:
         elif target == "vibration_mm_s":
             self.state["screw_speed_rpm"] = max(80.0, self.state["screw_speed_rpm"] - 5.0)
 
+        self._clamp_state()
+        self._correction_setpoints = (
+            {key: self.state[key] for key in RISK_INPUTS}
+            if duration_s > 0.0
+            else {}
+        )
+        self._correction_expires_at = self.time_s + duration_s
         sensor = self._sensor_snapshot()
         self.sensor_history.append(sensor)
         return self.current_state()
