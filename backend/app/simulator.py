@@ -26,6 +26,12 @@ RISK_INPUTS = (
     "cooling_efficiency",
 )
 
+CORRECTION_LIMITS = {
+    "temperature_c": (-10.0, 0.0, 2.0),
+    "cooling_efficiency": (0.0, 0.2, 0.02),
+    "feed_rate_kg_h": (-130.0, 0.0, 15.0),
+}
+
 
 SCENARIO_PROFILES = {
     "normal": {
@@ -232,42 +238,45 @@ class ExtrusionSimulator:
 
         self._clamp_state()
 
-        if self._correction_setpoints:
-            if self.time_s <= self._correction_expires_at:
-                self.state.update(self._correction_setpoints)
-            else:
-                self._correction_setpoints.clear()
-                self._correction_expires_at = 0.0
+        self._apply_active_correction(dt)
+        self._clamp_state()
 
         snapshot = self._sensor_snapshot()
         self.sensor_history.append(snapshot)
         return self.current_state()
 
+    def _apply_active_correction(self, dt: float) -> None:
+        if not self._correction_setpoints:
+            return
+        if self.time_s > self._correction_expires_at:
+            self._correction_setpoints.clear()
+            self._correction_expires_at = 0.0
+            return
+        for target, setpoint in self._correction_setpoints.items():
+            rate = CORRECTION_LIMITS[target][2]
+            difference = setpoint - self.state[target]
+            maximum_step = rate * max(0.0, dt)
+            self.state[target] += max(-maximum_step, min(difference, maximum_step))
+
     def apply_advisory(self, advisory: Dict[str, Any]) -> Dict[str, Any]:
         target = advisory.get("target_process_variable", "temperature_c")
+        if target not in CORRECTION_LIMITS:
+            raise ValueError(f"Unsupported advisory target: {target!r}")
+        minimum_adjustment, maximum_adjustment, _ = CORRECTION_LIMITS[target]
         adjustment = float(advisory.get("suggested_adjustment", 0.0))
+        adjustment = max(minimum_adjustment, min(adjustment, maximum_adjustment))
         duration_s = max(0.0, min(float(advisory.get("duration_s", 180.0)), 600.0))
-        if target not in self.state:
-            target = "temperature_c"
 
         current = float(self.state.get(target, 0.0))
-        self.state[target] = current + adjustment
-        self.event_log.append(f"Applied advisory to {target}: {adjustment}")
-
-        if target == "temperature_c":
-            self.state["cooling_efficiency"] = min(1.0, self.state["cooling_efficiency"] + 0.04)
-        elif target == "feed_rate_kg_h":
-            self.state["pressure_bar"] = max(35.0, self.state["pressure_bar"] - 2.5)
-        elif target == "vibration_mm_s":
-            self.state["screw_speed_rpm"] = max(80.0, self.state["screw_speed_rpm"] - 5.0)
-
-        self._clamp_state()
-        self._correction_setpoints = (
-            {key: self.state[key] for key in RISK_INPUTS}
-            if duration_s > 0.0
-            else {}
-        )
+        minimum, maximum = SENSOR_BOUNDS[target]
+        if target == "feed_rate_kg_h":
+            minimum = max(minimum, SCENARIO_PROFILES["normal"]["feed_rate_kg_h"])
+        setpoint = max(minimum, min(current + adjustment, maximum))
+        self.event_log.append(f"Applied bounded advisory to {target}: setpoint {setpoint}")
+        self._correction_setpoints = {target: setpoint} if duration_s > 0.0 else {}
         self._correction_expires_at = self.time_s + duration_s
+        self._apply_active_correction(1.0)
+        self._clamp_state()
         sensor = self._sensor_snapshot()
         self.sensor_history.append(sensor)
         return self.current_state()

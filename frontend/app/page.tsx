@@ -18,6 +18,7 @@ import {
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8001"
 
 type RiskMap = Record<"surface_cracking" | "warping" | "thickness_non_uniformity", number>
+type ModelRisk = RiskMap & { overall_risk: number; risk_band: string; lead_time_estimate_s: number }
 
 type Sensor = Record<string, number | string | null>
 
@@ -33,26 +34,35 @@ type Dashboard = {
     overall_risk: number
     risk_band: string
     lead_time_estimate_s: number
-    baseline_lstm_risk: RiskMap
+    model_comparison?: {
+      primary_model: "pinn"
+      lstm_status: "active" | "warming_up"
+      lstm_risk: ModelRisk | null
+    }
   }
   advisory: any
   notice: string
 }
 
 type MetricsResponse = {
-  synthetic_holdout: boolean
-  label: string
+  synthetic_holdout?: boolean
+  scope?: string
+  label?: string
   pinn: {
     mae: number
     mse: number
-    synthetic_holdout: boolean
-    label: string
+    sample_count?: number
+    synthetic_holdout?: boolean
+    scope?: string
+    label?: string
   }
   lstm: {
     mae: number
     mse: number
-    synthetic_holdout: boolean
-    label: string
+    sample_count?: number
+    synthetic_holdout?: boolean
+    scope?: string
+    label?: string
   }
 }
 
@@ -91,7 +101,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 
 function getRiskBand(value: number) {
   if (value < 0.35) return "low"
-  if (value < 0.7) return "moderate"
+  if (value < 0.65) return "moderate"
   return "high"
 }
 
@@ -105,9 +115,8 @@ function MetricCard({
   metrics: MetricsResponse["pinn"]
 }) {
   const chartData = [
-    { metric: "Accuracy", value: clamp(100 * (1 - metrics.mae), 0, 100) },
-    { metric: "False alarm", value: clamp(100 * (metrics.mse / (1 + metrics.mse)), 0, 100) },
-    { metric: "Eval set", value: 100 },
+    { metric: "MAE", value: metrics.mae },
+    { metric: "MSE", value: metrics.mse },
   ]
 
   return (
@@ -117,7 +126,11 @@ function MetricCard({
           <p className="eyebrow subtle">{model === "pinn" ? "Physics-informed risk network" : "Sensor-only LSTM"}</p>
           <h3>{title}</h3>
         </div>
-        <span className="chip">{metrics.synthetic_holdout ? "Synthetic holdout" : "Live sample"}</span>
+        <span className="chip">
+          {metrics.synthetic_holdout
+            ? "Synthetic holdout"
+            : metrics.label ?? "Evaluation scope unavailable"}
+        </span>
       </div>
 
       <div className="mini-chart">
@@ -125,7 +138,7 @@ function MetricCard({
           <BarChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(148,163,184,0.12)" />
             <XAxis dataKey="metric" tick={{ fill: "#9bb4c8", fontSize: 11 }} axisLine={false} tickLine={false} />
-            <YAxis hide domain={[0, 100]} />
+            <YAxis hide />
             <Tooltip
               contentStyle={{
                 background: "#09141d",
@@ -141,22 +154,21 @@ function MetricCard({
 
       <div className="metric-grid">
         <div>
-          <span className="metric-label">Per-label accuracy</span>
-          <strong>{(clamp(100 * (1 - metrics.mae), 0, 100)).toFixed(1)}%</strong>
+          <span className="metric-label">Held-out MAE</span>
+          <strong>{metrics.mae.toFixed(3)}</strong>
         </div>
         <div>
-          <span className="metric-label">False alarm rate</span>
-          <strong>{(clamp(100 * (metrics.mse / (1 + metrics.mse)), 0, 100)).toFixed(1)}%</strong>
+          <span className="metric-label">Held-out MSE</span>
+          <strong>{metrics.mse.toFixed(3)}</strong>
         </div>
         <div>
-          <span className="metric-label">Held-out samples</span>
-          <strong>{metrics.synthetic_holdout ? "Synthetic" : "Live"}</strong>
+          <span className="metric-label">Held-out observations</span>
+          <strong>{metrics.sample_count?.toLocaleString() ?? "—"}</strong>
         </div>
       </div>
 
       <div className="metrics-meta">
-        <span>MAE {metrics.mae.toFixed(3)}</span>
-        <span>MSE {metrics.mse.toFixed(3)}</span>
+        <span>{metrics.scope?.replaceAll("_", " ") ?? metrics.label ?? "Evaluation scope unavailable"}</span>
       </div>
     </div>
   )
@@ -585,7 +597,7 @@ export default function Home() {
         <div className="section-header">
           <div>
             <p className="eyebrow">Model Evaluation</p>
-            <h2>Synthetic / simulated repository evaluation</h2>
+            <h2>Synthetic simulator holdout</h2>
           </div>
         </div>
 
@@ -599,6 +611,15 @@ export default function Home() {
             <div className="loading-card">Loading model metrics…</div>
           )}
         </div>
+        {dashboard?.risk.model_comparison && (
+          <div className="metrics-meta">
+            <span>
+              Live LSTM comparator: {dashboard.risk.model_comparison.lstm_status === "active"
+                ? `${formatPercent(dashboard.risk.model_comparison.lstm_risk?.overall_risk ?? 0)} overall risk`
+                : "warming up"}
+            </span>
+          </div>
+        )}
       </section>
 
       <section className="panel roi-panel" id="roi">

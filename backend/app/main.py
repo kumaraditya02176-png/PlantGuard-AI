@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any, Dict, List
 
 import torch
@@ -7,7 +8,14 @@ from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.advisory import generate_advisory_for_state
-from backend.app.modeling import compute_risk_from_state, evaluate_metrics, train_lstm_model, train_pinn_model
+from backend.app.modeling import (
+    LSTM_TRAINING_EPOCHS,
+    PINN_TRAINING_EPOCHS,
+    evaluate_metrics,
+    risk_from_predictions,
+    train_lstm_model,
+    train_pinn_model,
+)
 from backend.app.preprocessing import prepare_dataset
 from backend.app.simulator import ExtrusionSimulator
 
@@ -23,14 +31,43 @@ app.add_middleware(
 simulator = ExtrusionSimulator("normal")
 risk_history: List[float] = []
 _model_cache: Dict[str, Any] | None = None
+_model_cache_lock = Lock()
 
 
 def _snapshot_sensor(sensor: Dict[str, float]) -> Dict[str, float]:
     return {k: float(v) for k, v in sensor.items() if k != "timestamp_s"}
 
 
-def _build_risk_payload(sensor: Dict[str, float]) -> Dict[str, float]:
-    raw_risk = compute_risk_from_state(sensor, risk_history)
+def _predict_models(sensor_history: List[Dict[str, float]]) -> Dict[str, Any]:
+    cache = _ensure_model_cache()
+    dataset = cache["dataset"]
+    columns = dataset["columns"]
+    history = sensor_history[-max(dataset["window_size"], 1) :]
+    raw_features = torch.as_tensor(
+        [[float(reading[column]) for column in columns] for reading in history],
+        dtype=torch.float32,
+    )
+    scaled_features = dataset["preprocessor"].transform(raw_features.numpy())
+    pinn_input = torch.as_tensor(scaled_features[-1:], dtype=torch.float32)
+    with torch.no_grad():
+        pinn_prediction = cache["pinn"](pinn_input)[0].numpy()
+        lstm_prediction = None
+        if len(history) >= dataset["window_size"]:
+            lstm_input = torch.as_tensor(scaled_features[-dataset["window_size"] :][None, :, :], dtype=torch.float32)
+            lstm_prediction = cache["lstm"](lstm_input)[0].numpy()
+    return {"pinn": pinn_prediction, "lstm": lstm_prediction}
+
+
+def _build_risk_payload(
+    sensor: Dict[str, float],
+    sensor_history: List[Dict[str, float]] | None = None,
+) -> Dict[str, Any]:
+    history = sensor_history or [sensor]
+    predictions = _predict_models(history)
+    raw_risk = risk_from_predictions(predictions["pinn"], risk_history)
+    lstm_risk = risk_from_predictions(predictions["lstm"]) if predictions["lstm"] is not None else None
+    if lstm_risk is not None:
+        lstm_risk["thickness_non_uniformity"] = lstm_risk.pop("thickness_variation")
     risk_map = {
         "surface_cracking": float(raw_risk["surface_cracking"]),
         "warping": float(raw_risk["warping"]),
@@ -38,19 +75,19 @@ def _build_risk_payload(sensor: Dict[str, float]) -> Dict[str, float]:
         "overall_risk": float(raw_risk["overall_risk"]),
         "risk_band": str(raw_risk["risk_band"]),
         "lead_time_estimate_s": float(raw_risk["lead_time_estimate_s"]),
+        "model_comparison": {
+            "primary_model": "pinn",
+            "lstm_status": "active" if predictions["lstm"] is not None else "warming_up",
+            "lstm_risk": lstm_risk,
+        },
     }
-    baseline = {k: float(v) for k, v in risk_map.items() if k not in {"risk_band", "lead_time_estimate_s", "overall_risk"}}
-    baseline["overall_risk"] = float(min(1.0, risk_map["overall_risk"] * 1.05))
-    baseline["risk_band"] = risk_map["risk_band"]
-    baseline["lead_time_estimate_s"] = float(max(6.0, risk_map["lead_time_estimate_s"] * 1.03))
-    risk_map["baseline_lstm_risk"] = baseline
     return risk_map
 
 
 def _build_dashboard() -> Dict[str, Any]:
     sim_state = simulator.current_state()
     sensor = sim_state["sensor"]
-    risk = _build_risk_payload(sensor)
+    risk = _build_risk_payload(sensor, sim_state["history"])
     advisory = generate_advisory_for_state({
         "surface_cracking": risk["surface_cracking"],
         "warping": risk["warping"],
@@ -93,11 +130,7 @@ def _build_dashboard() -> Dict[str, Any]:
             "overall_risk": float(risk["overall_risk"]),
             "risk_band": str(risk["risk_band"]),
             "lead_time_estimate_s": float(risk["lead_time_estimate_s"]),
-            "baseline_lstm_risk": {
-                "surface_cracking": float(risk["baseline_lstm_risk"]["surface_cracking"]),
-                "warping": float(risk["baseline_lstm_risk"]["warping"]),
-                "thickness_non_uniformity": float(risk["baseline_lstm_risk"]["surface_cracking"] * 0.0 + risk["baseline_lstm_risk"]["warping"] * 0.0 + risk["baseline_lstm_risk"]["surface_cracking"] * 0.0),
-            },
+            "model_comparison": risk["model_comparison"],
         },
         "advisory": advisory,
         "notice": "SIMULATION ONLY — synthetic / simulated repository evaluation; no direct machine control.",
@@ -107,14 +140,24 @@ def _build_dashboard() -> Dict[str, Any]:
 def _ensure_model_cache() -> Dict[str, Any]:
     global _model_cache
     if _model_cache is None:
-        dataset = prepare_dataset(window_size=8)
-        x_train = dataset["x_train"].reshape(-1, dataset["x_train"].shape[-1])
-        y_train = dataset["y_train"].reshape(-1, 3)
-        _model_cache = {
-            "pinn": train_pinn_model(x_train, y_train, epochs=8),
-            "lstm": train_lstm_model(dataset["x_train"], dataset["y_train"], epochs=8),
-            "dataset": dataset,
-        }
+        with _model_cache_lock:
+            if _model_cache is None:
+                dataset = prepare_dataset(window_size=8)
+                torch.manual_seed(42)
+                _model_cache = {
+                    "pinn": train_pinn_model(
+                        dataset["x_train"],
+                        dataset["y_train"],
+                        dataset["raw_x_train"],
+                        epochs=PINN_TRAINING_EPOCHS,
+                    ),
+                    "lstm": train_lstm_model(
+                        dataset["x_train_windows"],
+                        dataset["y_train_windows"],
+                        epochs=LSTM_TRAINING_EPOCHS,
+                    ),
+                    "dataset": dataset,
+                }
     return _model_cache
 
 
@@ -141,8 +184,9 @@ def get_sensor_history(limit: int = 90) -> Dict[str, Any]:
 
 @app.get("/api/v1/risk/latest")
 def get_latest_risk() -> Dict[str, Any]:
-    sensor = simulator.current_state()["sensor"]
-    risk = _build_risk_payload(sensor)
+    state = simulator.current_state()
+    sensor = state["sensor"]
+    risk = _build_risk_payload(sensor, state["history"])
     return {
         "risk": {
             "surface_cracking": float(risk["surface_cracking"]),
@@ -152,13 +196,15 @@ def get_latest_risk() -> Dict[str, Any]:
         "overall_risk": float(risk["overall_risk"]),
         "risk_band": risk["risk_band"],
         "lead_time_estimate_s": float(risk["lead_time_estimate_s"]),
+        "model_comparison": risk["model_comparison"],
     }
 
 
 @app.get("/api/v1/advisory/latest")
 def get_latest_advisory() -> Dict[str, Any]:
-    sensor = simulator.current_state()["sensor"]
-    risk = _build_risk_payload(sensor)
+    state = simulator.current_state()
+    sensor = state["sensor"]
+    risk = _build_risk_payload(sensor, state["history"])
     advisory = generate_advisory_for_state({
         "surface_cracking": risk["surface_cracking"],
         "warping": risk["warping"],
@@ -170,8 +216,9 @@ def get_latest_advisory() -> Dict[str, Any]:
 
 @app.post("/api/v1/advisories/apply")
 def apply_advisory() -> Dict[str, Any]:
-    sensor = simulator.current_state()["sensor"]
-    risk = _build_risk_payload(sensor)
+    state = simulator.current_state()
+    sensor = state["sensor"]
+    risk = _build_risk_payload(sensor, state["history"])
     recommendation = generate_advisory_for_state({
         "surface_cracking": risk["surface_cracking"],
         "warping": risk["warping"],
@@ -213,13 +260,16 @@ def get_metrics() -> Dict[str, Any]:
     y_test = dataset["y_test"]
     x_test_tensor = torch.as_tensor(x_test, dtype=torch.float32)
     y_test_tensor = torch.as_tensor(y_test, dtype=torch.float32)
-    pinn_preds = cache["pinn"](x_test_tensor.reshape(-1, x_test_tensor.shape[-1]))
-    lstm_preds = cache["lstm"](x_test_tensor)
-    pinn_metrics = evaluate_metrics(pinn_preds.detach().numpy(), y_test_tensor.reshape(-1, 3).numpy())
-    lstm_metrics = evaluate_metrics(lstm_preds.detach().numpy(), y_test_tensor.reshape(-1, 3).numpy())
+    x_test_windows = torch.as_tensor(dataset["x_test_windows"], dtype=torch.float32)
+    y_test_windows = torch.as_tensor(dataset["y_test_windows"], dtype=torch.float32)
+    with torch.no_grad():
+        pinn_preds = cache["pinn"](x_test_tensor)
+        lstm_preds = cache["lstm"](x_test_windows)
+    pinn_metrics = evaluate_metrics(pinn_preds.numpy(), y_test_tensor.numpy())
+    lstm_metrics = evaluate_metrics(lstm_preds.numpy(), y_test_windows.numpy())
     return {
         "synthetic_holdout": True,
-        "label": "synthetic / simulated repository evaluation",
+        "scope": "synthetic_simulator_holdout",
         "pinn": pinn_metrics,
         "lstm": lstm_metrics,
     }
@@ -227,7 +277,8 @@ def get_metrics() -> Dict[str, Any]:
 
 @app.get("/api/v1/roi")
 def get_roi() -> Dict[str, Any]:
-    risk = _build_risk_payload(simulator.current_state()["sensor"])
+    state = simulator.current_state()
+    risk = _build_risk_payload(state["sensor"], state["history"])
     overall = float(risk["overall_risk"])
     annual_savings = max(0.0, 1200000.0 * (0.8 - overall) * 0.12)
     scrap_reduction = max(0.0, (0.9 - overall) * 100.0)
@@ -244,4 +295,3 @@ def get_roi() -> Dict[str, Any]:
 @app.get("/")
 def root() -> Dict[str, str]:
     return {"status": "ok", "service": "PlantGuard AI"}
-

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from backend.app.modeling import risk_band_for_value
+
 
 def advisory_from_risk(defect: str, risk_value: float, sensor: Dict[str, float]) -> Dict[str, Any]:
     defect_key = (defect or "normal").lower()
     risk = float(risk_value)
-    severity = "low" if risk < 0.35 else "moderate" if risk < 0.7 else "high"
+    severity = risk_band_for_value(risk)
 
     if defect_key == "surface_cracking":
         return {
