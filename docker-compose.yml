@@ -1,12 +1,43 @@
 services:
+  session-store:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   backend:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
-    ports: ["8000:8000"]
+    environment:
+      PLANTGUARD_ENV: development
+      PLANTGUARD_CORS_ORIGINS: http://127.0.0.1:3101,http://localhost:3101
+      PLANTGUARD_MUTATION_TOKEN: ${PLANTGUARD_MUTATION_TOKEN:?Set PLANTGUARD_MUTATION_TOKEN before starting Compose}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    ports: ["127.0.0.1:8003:8000"]
   frontend:
     build:
       context: frontend
       dockerfile: ../docker/frontend.Dockerfile
-    ports: ["3000:3000"]
-    depends_on: [backend]
+    environment:
+      PLANTGUARD_API_URL: http://backend:8000
+      PLANTGUARD_MUTATION_TOKEN: ${PLANTGUARD_MUTATION_TOKEN:?Set PLANTGUARD_MUTATION_TOKEN before starting Compose}
+      PLANTGUARD_SESSION_STORE_URL: redis://session-store:6379/0
+      PLANTGUARD_OPERATOR_USERNAME: ${PLANTGUARD_OPERATOR_USERNAME:?Set PLANTGUARD_OPERATOR_USERNAME before starting Compose}
+      PLANTGUARD_OPERATOR_PASSWORD_HASH: ${PLANTGUARD_OPERATOR_PASSWORD_HASH:?Set PLANTGUARD_OPERATOR_PASSWORD_HASH before starting Compose}
+      PLANTGUARD_AUTH_ENV: ${PLANTGUARD_AUTH_ENV:-development}
+      PLANTGUARD_PUBLIC_ORIGIN: ${PLANTGUARD_PUBLIC_ORIGIN:-http://127.0.0.1:3101}
+      PLANTGUARD_COOKIE_SECURE: ${PLANTGUARD_COOKIE_SECURE:-false}
+      PLANTGUARD_TRUST_PROXY: ${PLANTGUARD_TRUST_PROXY:-false}
+    ports: ["127.0.0.1:3101:3000"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      session-store:
+        condition: service_healthy

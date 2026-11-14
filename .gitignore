@@ -14,3 +14,21 @@ reports/plots/*
 *.err
 
 .env.local
+
+# Generated TypeScript build files
+*.tsbuildinfo
+
+
+# Private academic and generated report files
+academic_submission/
+reports/
+
+# Environment and local database files
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated build metadata
+*.tsbuildinfo

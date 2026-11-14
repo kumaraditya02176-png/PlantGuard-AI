@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import math
+import os
+import secrets
 from threading import Lock
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
+from urllib.parse import urlsplit
 
 import torch
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, field_validator, model_validator
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import Response
 
 from backend.app.advisory import generate_advisory_for_state
 from backend.app.modeling import (
@@ -18,24 +26,147 @@ from backend.app.modeling import (
     train_pinn_model,
 )
 from backend.app.preprocessing import prepare_dataset
-from backend.app.simulator import ExtrusionSimulator
+from backend.app.simulator import SCENARIO_PROFILES, ExtrusionSimulator
+
+
+DEFAULT_CORS_ORIGINS = (
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+    "http://127.0.0.1:3102",
+    "http://localhost:3102",
+)
+MUTATION_TOKEN_MIN_LENGTH = 32
+MAX_SIMULATION_STEPS = 100
+
+
+def _configured_cors_origins() -> List[str]:
+    environment = os.getenv("PLANTGUARD_ENV", "development").strip().lower()
+    configured = os.getenv("PLANTGUARD_CORS_ORIGINS")
+    if not configured:
+        if environment == "production":
+            raise RuntimeError("PLANTGUARD_CORS_ORIGINS must be configured in production.")
+        return list(DEFAULT_CORS_ORIGINS)
+
+    origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    if not origins or "*" in origins:
+        raise RuntimeError("PLANTGUARD_CORS_ORIGINS must contain explicit origins and cannot contain '*'.")
+    for origin in origins:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or origin.endswith("/")
+            or parsed.username
+            or parsed.password
+        ):
+            raise RuntimeError("PLANTGUARD_CORS_ORIGINS must contain exact HTTP(S) origins without paths.")
+        if environment == "production" and parsed.scheme != "https":
+            raise RuntimeError("Production CORS origins must use HTTPS.")
+    return origins
+
+
+ALLOWED_CORS_ORIGINS = _configured_cors_origins()
+
+
+class StrictPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class ResetPayload(StrictPayload):
+    scenario: Literal[
+        "normal",
+        "overheating",
+        "uneven_cooling",
+        "feed_rate_instability",
+        "gradual_drift",
+        "sudden_disturbance",
+    ] = "normal"
+
+    @field_validator("scenario", mode="before")
+    @classmethod
+    def normalize_scenario(cls, value: object) -> object:
+        return value.lower() if isinstance(value, str) else value
+
+
+class InjectPayload(StrictPayload):
+    defect: Literal["surface_cracking", "warping", "thickness_variation"] = "surface_cracking"
+
+    @field_validator("defect", mode="before")
+    @classmethod
+    def normalize_defect(cls, value: object) -> object:
+        return value.lower() if isinstance(value, str) else value
+
+
+class AdvancePayload(StrictPayload):
+    dt: StrictInt | StrictFloat = 1.0
+    steps: StrictInt = Field(default=1, ge=1, le=MAX_SIMULATION_STEPS)
+
+    @field_validator("dt")
+    @classmethod
+    def validate_dt(cls, value: int | float) -> float:
+        dt = float(value)
+        if not math.isfinite(dt) or not 0.0 < dt <= 60.0:
+            raise ValueError("dt must be finite and between 0 and 60 seconds.")
+        return dt
+
+    @model_validator(mode="after")
+    def validate_elapsed_time(self) -> "AdvancePayload":
+        if self.dt * self.steps > 600.0:
+            raise ValueError("dt multiplied by steps must not exceed 600 seconds.")
+        return self
+
 
 app = FastAPI(title="PlantGuard AI API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+@app.middleware("http")
+async def reject_untrusted_origins(
+    request: Request,
+    call_next: RequestResponseEndpoint,
+) -> Response:
+    origin = request.headers.get("origin")
+    if origin and origin not in ALLOWED_CORS_ORIGINS:
+        return JSONResponse(status_code=403, content={"detail": "Origin is not allowed."})
+    return await call_next(request)
+
+
+def require_mutation_token(authorization: str | None = Header(default=None)) -> None:
+    expected = os.getenv("PLANTGUARD_MUTATION_TOKEN", "")
+    if len(expected) < MUTATION_TOKEN_MIN_LENGTH:
+        raise HTTPException(
+            status_code=503,
+            detail="Simulation mutations are disabled until a valid operator token is configured.",
+        )
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid operator token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    supplied = authorization[7:]
+    if not secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid operator token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
 
 simulator = ExtrusionSimulator("normal")
 risk_history: List[float] = []
 _simulation_lock = Lock()
 _model_cache: Dict[str, Any] | None = None
 _model_cache_lock = Lock()
-
-
 def _snapshot_sensor(sensor: Dict[str, float]) -> Dict[str, float]:
     return {k: float(v) for k, v in sensor.items() if k != "timestamp_s"}
 
@@ -175,6 +306,11 @@ def health() -> Dict[str, Any]:
     return {"status": "ok", "product": "PlantGuard AI", "simulation_only": True}
 
 
+@app.get("/api/v1/auth/status", dependencies=[Depends(require_mutation_token)])
+def mutation_auth_status() -> Dict[str, bool]:
+    return {"authorized": True}
+
+
 @app.get("/api/v1/dashboard")
 def get_dashboard() -> Dict[str, Any]:
     with _simulation_lock:
@@ -188,7 +324,7 @@ def get_latest_sensor() -> Dict[str, Any]:
 
 
 @app.get("/api/v1/sensors/history")
-def get_sensor_history(limit: int = 90) -> Dict[str, Any]:
+def get_sensor_history(limit: int = Query(default=90, ge=1, le=1000)) -> Dict[str, Any]:
     with _simulation_lock:
         history = simulator.sensor_history[-limit:]
         return {"readings": history}
@@ -229,7 +365,7 @@ def get_latest_advisory() -> Dict[str, Any]:
         return advisory
 
 
-@app.post("/api/v1/advisories/apply")
+@app.post("/api/v1/advisories/apply", dependencies=[Depends(require_mutation_token)])
 def apply_advisory() -> Dict[str, Any]:
     with _simulation_lock:
         state = simulator.current_state()
@@ -270,30 +406,26 @@ def apply_advisory() -> Dict[str, Any]:
         return dashboard
 
 
-@app.post("/api/v1/simulation/reset")
-def reset_simulation(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+@app.post("/api/v1/simulation/reset", dependencies=[Depends(require_mutation_token)])
+def reset_simulation(payload: ResetPayload = Body(...)) -> Dict[str, Any]:
     with _simulation_lock:
-        scenario = str(payload.get("scenario", "normal")).lower()
-        simulator.reset(scenario)
+        simulator.reset(payload.scenario)
         risk_history.clear()
         return _build_dashboard()
 
 
-@app.post("/api/v1/simulation/inject")
-def inject_defect(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+@app.post("/api/v1/simulation/inject", dependencies=[Depends(require_mutation_token)])
+def inject_defect(payload: InjectPayload = Body(...)) -> Dict[str, Any]:
     with _simulation_lock:
-        defect = str(payload.get("defect", "surface_cracking")).lower()
-        simulator.inject_defect(defect)
+        simulator.inject_defect(payload.defect)
         return _build_dashboard()
 
 
-@app.post("/api/v1/simulation/advance")
-def advance_simulation(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+@app.post("/api/v1/simulation/advance", dependencies=[Depends(require_mutation_token)])
+def advance_simulation(payload: AdvancePayload = Body(...)) -> Dict[str, Any]:
     with _simulation_lock:
-        dt = float(payload.get("dt", 1.0))
-        steps = max(1, int(payload.get("steps", 1)))
-        for _ in range(steps):
-            simulator.advance(dt)
+        for _ in range(payload.steps):
+            simulator.advance(payload.dt)
         return _build_dashboard()
 
 

@@ -30,6 +30,16 @@ SCENARIOS = [
     "gradual_drift",
     "sudden_disturbance",
 ]
+TEST_MUTATION_TOKEN = "test-only-plantguard-mutation-token-32"
+
+
+@pytest.fixture(autouse=True)
+def configure_test_mutation_token(monkeypatch):
+    monkeypatch.setenv("PLANTGUARD_MUTATION_TOKEN", TEST_MUTATION_TOKEN)
+
+
+def authorized_client() -> TestClient:
+    return TestClient(app, headers={"Authorization": f"Bearer {TEST_MUTATION_TOKEN}"})
 
 
 def test_simulator_reset_and_six_scenarios():
@@ -305,7 +315,7 @@ def test_api_dashboard_advisory_use_cached_pinn_and_lstm_warms_up(monkeypatch):
         "backend.app.modeling.compute_risk_from_state",
         lambda *args, **kwargs: pytest.fail("API called the non-model risk helper"),
     )
-    client = TestClient(app)
+    client = authorized_client()
 
     reset = client.post("/api/v1/simulation/reset", json={"scenario": "overheating"})
     assert reset.status_code == 200
@@ -356,7 +366,7 @@ def test_api_dashboard_advisory_use_cached_pinn_and_lstm_warms_up(monkeypatch):
 @pytest.mark.parametrize("scenario", ["overheating", "feed_rate_instability"])
 def test_model_backed_api_advisory_beats_matched_control(scenario, monkeypatch):
     monkeypatch.setattr(main_module, "simulator", ExtrusionSimulator(scenario))
-    client = TestClient(app)
+    client = authorized_client()
     reset = client.post("/api/v1/simulation/reset", json={"scenario": scenario})
     assert reset.status_code == 200
 
@@ -411,7 +421,7 @@ def test_api_repeated_correction_is_idempotent_and_reports_before_after(scenario
         "_predict_models",
         lambda _: {"pinn": pinn_prediction, "lstm": None},
     )
-    client = TestClient(app)
+    client = authorized_client()
     baseline = client.post("/api/v1/simulation/reset", json={"scenario": scenario}).json()
     first = client.post("/api/v1/advisories/apply").json()
     correction = first["correction_result"]
@@ -542,7 +552,7 @@ def test_advisory_adjustment_is_clamped_to_sensor_bounds():
 
 
 def test_fastapi_endpoints():
-    client = TestClient(app)
+    client = authorized_client()
     assert client.get("/health").status_code == 200
     dashboard = client.get("/api/v1/dashboard")
     assert dashboard.status_code == 200
@@ -607,27 +617,134 @@ def test_fastapi_endpoints():
     assert "illustrative_estimate" in roi.json()
 
 
+def test_simulation_api_rejects_invalid_inputs_without_mutating_state():
+    client = authorized_client()
+    reset = client.post("/api/v1/simulation/reset", json={"scenario": "normal"})
+    assert reset.status_code == 200
+    initial_sensor = reset.json()["simulation"]["latest_sensor"]
+
+    invalid_requests = [
+        client.post("/api/v1/simulation/reset", json={"scenario": "unknown"}),
+        client.post("/api/v1/simulation/inject", json={"defect": "unknown"}),
+        client.post("/api/v1/simulation/advance", json={"dt": "not-a-number", "steps": 1}),
+        client.post("/api/v1/simulation/advance", json={"dt": -1, "steps": 1}),
+        client.post("/api/v1/simulation/advance", json={"dt": 1, "steps": 0}),
+        client.post("/api/v1/simulation/advance", json={"dt": 1, "steps": 101}),
+        client.get("/api/v1/sensors/history?limit=0"),
+    ]
+    assert all(response.status_code == 422 for response in invalid_requests)
+    assert all("detail" in response.json() for response in invalid_requests)
+    assert client.get("/api/v1/sensors/latest").json()["sensor"] == initial_sensor
+
+
+def test_mutation_authentication_and_cors_fail_closed_without_state_change(monkeypatch):
+    unauthenticated = TestClient(app)
+    initial_sensor = unauthenticated.get("/api/v1/sensors/latest").json()["sensor"]
+
+    missing_token = unauthenticated.post("/api/v1/simulation/reset", json={"scenario": "overheating"})
+    wrong_token = unauthenticated.post(
+        "/api/v1/simulation/advance",
+        json={"dt": 1, "steps": 1},
+        headers={"Authorization": "Bearer incorrect-token"},
+    )
+    assert missing_token.status_code == 401
+    assert wrong_token.status_code == 401
+    assert unauthenticated.get("/api/v1/auth/status").status_code == 401
+    assert unauthenticated.get("/api/v1/sensors/latest").json()["sensor"] == initial_sensor
+
+    monkeypatch.setenv("PLANTGUARD_MUTATION_TOKEN", "")
+    unconfigured = authorized_client().post("/api/v1/simulation/reset", json={"scenario": "normal"})
+    assert unconfigured.status_code == 503
+    monkeypatch.setenv("PLANTGUARD_MUTATION_TOKEN", TEST_MUTATION_TOKEN)
+
+    untrusted_origin = unauthenticated.get("/health", headers={"Origin": "https://untrusted.example"})
+    assert untrusted_origin.status_code == 403
+    allowed_origin_client = TestClient(
+        app,
+        headers={
+            "Authorization": f"Bearer {TEST_MUTATION_TOKEN}",
+            "Origin": "http://127.0.0.1:3102",
+        },
+    )
+    authorized = allowed_origin_client.post("/api/v1/simulation/reset", json={"scenario": "overheating"})
+    assert authorized.status_code == 200
+    assert authorized.headers["access-control-allow-origin"] == "http://127.0.0.1:3102"
+    assert allowed_origin_client.get("/api/v1/auth/status").json() == {"authorized": True}
+
+
 def test_frontend_files_and_build_contract():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    page = root / "frontend" / "app" / "page.tsx"
+    frontend = root / "frontend"
+    page = frontend / "app" / "page.tsx"
     layout = root / "frontend" / "app" / "layout.tsx"
-    globals_css = root / "frontend" / "app" / "globals.css"
+    shell = frontend / "components" / "app-shell.tsx"
+    provider = frontend / "components" / "app-provider.tsx"
+    pages = frontend / "components" / "section-pages.tsx"
+    api = frontend / "lib" / "plantguard.ts"
+    auth_route = frontend / "app" / "api" / "auth" / "route.ts"
+    backend_proxy = frontend / "app" / "api" / "backend" / "[...path]" / "route.ts"
+    server_auth = frontend / "lib" / "server-auth.ts"
 
     assert page.exists()
     assert layout.exists()
-    assert globals_css.exists()
+    assert (frontend / "app" / "globals.css").exists()
+    assert (frontend / "app" / "overview" / "page.tsx").exists()
+    assert (frontend / "app" / "[section]" / "page.tsx").exists()
+    assert (frontend / "app" / "assets" / "[assetId]" / "page.tsx").exists()
+    assert shell.exists()
+    assert provider.exists()
+    assert pages.exists()
+    assert api.exists()
+    assert auth_route.exists()
+    assert backend_proxy.exists()
+    assert server_auth.exists()
 
-    page_text = page.read_text(encoding="utf-8")
-    assert "SIMULATION ONLY" in page_text or "SIMULATION ONLY" in (root / "frontend" / "app" / "page.tsx").read_text(encoding="utf-8")
-    assert "http://localhost:8000" in page_text or "NEXT_PUBLIC_API_URL" in page_text
-    assert "Monitor" in page_text or "Advisory" in page_text
-    assert "ROI" in page_text
-    assert "False alarm rate" not in page_text
-    assert "Per-label accuracy" not in page_text
-    assert "Defect-specific risk" in page_text
-    assert "PINN drives dashboard and advisory risk" in page_text
-    assert "commandInProgress" in page_text
-    assert "requestVersion" in page_text
-    assert "Total risk is not guaranteed to improve" in page_text
+    shell_text = shell.read_text(encoding="utf-8")
+    provider_text = provider.read_text(encoding="utf-8")
+    pages_text = pages.read_text(encoding="utf-8")
+    api_text = api.read_text(encoding="utf-8")
+    auth_text = auth_route.read_text(encoding="utf-8")
+    proxy_text = backend_proxy.read_text(encoding="utf-8")
+    server_auth_text = server_auth.read_text(encoding="utf-8")
+
+    for route in (
+        "/overview", "/assets", "/telemetry", "/analytics", "/alerts",
+        "/advisory", "/workflows", "/simulation", "/roi", "/reports",
+        "/integrations", "/settings",
+    ):
+        assert route in shell_text
+
+    assert "SIMULATION MODE" in shell_text
+    assert "no physical machine control" in shell_text
+    assert 'return "/api/backend"' in api_text
+    assert "NEXT_PUBLIC_API_URL" not in api_text
+    assert "authorizeMutations: (username: string, password: string)" in provider_text
+    assert "JSON.stringify({ username, password })" in provider_text
+    assert "JSON.stringify({ token })" not in provider_text
+    assert "HTTP-only" in pages_text
+    assert "csrfToken" in provider_text
+    assert "x-csrf-token" in proxy_text.lower()
+    assert "consumeLoginAttemptLimit" in auth_text
+    assert "createOperatorSession" in auth_text
+    assert "deleteOperatorSession" in auth_text
+    assert "PLANTGUARD_MUTATION_TOKEN" in server_auth_text
+    assert "NEXT_PUBLIC_" not in server_auth_text
+    assert "redis" in server_auth_text.lower()
+    assert "setInterval" in provider_text
+    assert "/api/v1/simulation/reset" in provider_text
+    assert "/api/v1/simulation/inject" in provider_text
+    assert "/api/v1/simulation/advance" in provider_text
+    assert "/api/v1/advisories/apply" in provider_text
+    assert "Defect-specific model risk" in pages_text
+    assert "Synthetic simulator holdout" in pages_text
+    assert "false-alarm rate" in pages_text
+    assert "CSV" in pages_text
+    assert "Annual throughput" in pages_text
+    assert "relative reduction" in pages_text
+    assert "Not connected" in pages_text
+    assert "Risk may not always improve immediately" in pages_text
+    assert "No physical plant" in pages_text
+    assert "Increase screw speed by" not in pages_text
+    assert "Enable secondary feeder support" not in pages_text

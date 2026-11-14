@@ -3,7 +3,6 @@ $ErrorActionPreference = 'Stop'
 $root = 'C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready'
 $frontend = Join-Path $root 'frontend'
 $venvPython = 'C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\.venv\Scripts\python.exe'
-$npmCmd = (Get-Command npm.cmd).Source
 $npmRunner = 'C:\Program Files\nodejs\npm.cmd'
 
 if (-not (Test-Path $root)) {
@@ -22,7 +21,7 @@ Set-Location $root
 $env:PYTHONPATH = $root
 
 function Stop-PlantGuardProcesses {
-    $matches = Get-CimInstance Win32_Process |
+    $matchingProcesses = Get-CimInstance Win32_Process |
         Where-Object {
             $_.Name -match 'node|python' -and (
                 $_.CommandLine -match 'C:\\Users\\ADITYA\\Downloads\\PlantGuard-AI-Codex-Ready1.0\\PlantGuard-AI-Codex-Ready' -or
@@ -32,7 +31,7 @@ function Stop-PlantGuardProcesses {
             )
         }
 
-    foreach ($p in $matches) {
+    foreach ($p in $matchingProcesses) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
 }
