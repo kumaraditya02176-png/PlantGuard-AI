@@ -66,13 +66,14 @@ const pageTitles: Record<string, string> = {
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
-  const { dashboard, online, error, refresh } = usePlantGuard()
+  const { dashboard, industry, industries, online, error, refresh, selectIndustry } = usePlantGuard()
   const [theme, setThemeState] = useState<ThemeName>("midnight")
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false)
   const [notificationReadSignal, setNotificationReadSignal] = useState("")
   const [searchIndex, setSearchIndex] = useState(0)
   const searchTriggerRef = useRef<HTMLButtonElement>(null)
@@ -83,6 +84,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const mobileNavCloseRef = useRef<HTMLButtonElement>(null)
   const mobileNavRef = useRef<HTMLElement>(null)
   const previousMobileFocus = useRef<HTMLElement | null>(null)
+  const workspaceMenuRef = useRef<HTMLDivElement>(null)
+  const workspaceMenuTriggerRef = useRef<HTMLButtonElement>(null)
+  const workspaceMenuItemsRef = useRef<Array<HTMLAnchorElement | null>>([])
 
   const setTheme = useCallback((nextTheme: ThemeName) => {
     setThemeState(nextTheme)
@@ -109,7 +113,20 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     setMobileOpen(false)
     setNotificationsOpen(false)
+    setWorkspaceMenuOpen(false)
   }, [pathname])
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) return
+    workspaceMenuItemsRef.current[0]?.focus()
+    function closeOnOutsidePointer(event: PointerEvent) {
+      if (event.target instanceof Node && !workspaceMenuRef.current?.contains(event.target)) {
+        setWorkspaceMenuOpen(false)
+      }
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePointer)
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer)
+  }, [workspaceMenuOpen])
 
   const section = pathname.split("/")[1] || "overview"
   const title = pageTitles[section] ?? (section === "assets" ? "Asset detail" : "PlantGuard AI")
@@ -180,6 +197,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         closeSearch()
         setNotificationsOpen(false)
         setMobileOpen(false)
+        if (workspaceMenuOpen) workspaceMenuTriggerRef.current?.focus()
+        setWorkspaceMenuOpen(false)
         return
       }
       if (!searchOpen || !searchResults.length) return
@@ -196,7 +215,26 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [searchOpen, searchIndex, searchResults, closeSearch, openSearch])
+  }, [searchOpen, searchIndex, searchResults, workspaceMenuOpen, closeSearch, openSearch])
+
+  function navigateWorkspaceMenu(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Tab") {
+      setWorkspaceMenuOpen(false)
+      return
+    }
+    const items = workspaceMenuItemsRef.current.filter((item): item is HTMLAnchorElement => item !== null)
+    if (!items.length) return
+    const currentIndex = items.indexOf(document.activeElement as HTMLAnchorElement)
+    let nextIndex: number | null = null
+    if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length
+    else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length
+    else if (event.key === "Home") nextIndex = 0
+    else if (event.key === "End") nextIndex = items.length - 1
+    if (nextIndex !== null) {
+      event.preventDefault()
+      items[nextIndex].focus()
+    }
+  }
 
   useEffect(() => {
     if (!searchOpen) return
@@ -297,7 +335,19 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
           <div className="sidebar-context">
             <span className="plant-avatar">PG</span>
-            <span className="plant-context-text"><strong>Extrusion demo</strong><small>SIMULATED PROCESS</small></span>
+            <label className="plant-context-text" htmlFor="active-industry">
+              <small>SIMULATED INDUSTRY</small>
+              <select
+                id="active-industry"
+                className="industry-selector"
+                aria-label="Select simulated industry"
+                value={industry?.id ?? "plastic_extrusion"}
+                disabled={!industries.length}
+                onChange={(event) => selectIndustry(event.target.value)}
+              >
+                {industries.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+              </select>
+            </label>
             <Icon className="context-chevron" name="chevron" />
           </div>
           <nav className="sidebar-nav">
@@ -367,7 +417,38 @@ export function AppShell({ children }: { children: ReactNode }) {
                 )}
               </div>
               <div className="topbar-status"><span className={`status-dot ${online ? "online" : "offline"}`} /><span>{online ? "Connected" : "Disconnected"}</span></div>
-              <div className="workspace-identity"><span className="identity-avatar">PG</span><span><strong>Demo workspace</strong><small>Local simulation</small></span></div>
+              <div className="workspace-menu-wrap" ref={workspaceMenuRef}>
+                <button
+                  ref={workspaceMenuTriggerRef}
+                  className="workspace-identity"
+                  type="button"
+                  aria-label="Open Demo workspace menu"
+                  aria-haspopup="menu"
+                  aria-controls="workspace-menu"
+                  aria-expanded={workspaceMenuOpen}
+                  onClick={() => setWorkspaceMenuOpen((open) => !open)}
+                >
+                  <span className="identity-avatar" aria-hidden="true">PG</span>
+                  <span><strong>Demo workspace</strong><small>Local simulation</small></span>
+                </button>
+                {workspaceMenuOpen && (
+                  <div
+                    id="workspace-menu"
+                    className="workspace-menu"
+                    role="menu"
+                    aria-label="Demo workspace"
+                    onKeyDown={navigateWorkspaceMenu}
+                  >
+                    <div className="workspace-menu-context">
+                      <strong>Demo workspace</strong>
+                      <small>Single local workspace · no switching configured</small>
+                    </div>
+                    <Link ref={(element) => { workspaceMenuItemsRef.current[0] = element }} className="workspace-menu-item" href="/overview" role="menuitem" onClick={() => setWorkspaceMenuOpen(false)}>Overview</Link>
+                    <Link ref={(element) => { workspaceMenuItemsRef.current[1] = element }} className="workspace-menu-item" href="/simulation" role="menuitem" onClick={() => setWorkspaceMenuOpen(false)}>Simulation lab</Link>
+                    <Link ref={(element) => { workspaceMenuItemsRef.current[2] = element }} className="workspace-menu-item" href="/settings" role="menuitem" onClick={() => setWorkspaceMenuOpen(false)}>Application settings</Link>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
           <div className="global-simulation-strip"><span className="simulation-pulse" /> SIMULATION MODE <span>Advisory only · no physical machine control</span><span className="strip-status">{dashboard?.simulation.active_scenario?.type ? titleCase(dashboard.simulation.active_scenario.type) : "Awaiting API"}</span></div>

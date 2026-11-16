@@ -13,15 +13,26 @@ const grid = "var(--chart-grid)"
 const tooltipStyle = { background: "var(--surface-raised)", border: "1px solid var(--border-strong)", borderRadius: 10, color: "var(--text)" }
 
 export function SensorTrendChart({ compact = false }: { compact?: boolean }) {
-  const { history } = usePlantGuard()
+  const { history, industry } = usePlantGuard()
   const [windowSize, setWindowSize] = useState("30")
-  const rows = useMemo(() => history.slice(-Number(windowSize)).map((reading, index) => ({
+  const series = useMemo(() => {
+    if (!industry || industry.id === "plastic_extrusion") {
+      return [
+        { key: "temperature_c", label: "Temperature (°C)" },
+        { key: "pressure_bar", label: "Pressure (bar)" },
+      ]
+    }
+    return industry.sensors.slice(0, 2).map((sensor) => ({
+      key: sensor.key,
+      label: `${sensor.label}${sensor.unit ? ` (${sensor.unit})` : ""}`,
+    }))
+  }, [industry])
+  const rows = useMemo(() => history.slice(-Number(windowSize)).map((reading) => ({
     timestamp: typeof reading.timestamp_s === "number" && Number.isFinite(reading.timestamp_s) ? reading.timestamp_s : null,
-    temperature: toNumber(reading.temperature_c),
-    pressure: toNumber(reading.pressure_bar),
-    thickness: toNumber(reading.thickness_mm),
-  })), [history, windowSize])
+    ...Object.fromEntries(series.map((item) => [item.key, toNumber(reading[item.key])])),
+  })), [history, series, windowSize])
   const timestampedRows = rows.filter((reading) => reading.timestamp !== null)
+  const colors = ["#ff9b62", "#6ac8ff"]
   return (
     <section className={`card chart-card ${compact ? "chart-card-compact" : ""}`}>
       <div className="card-heading">
@@ -34,44 +45,49 @@ export function SensorTrendChart({ compact = false }: { compact?: boolean }) {
             <LineChart data={timestampedRows} margin={{ top: 8, right: 12, bottom: 0, left: -14 }}>
               <CartesianGrid stroke={grid} vertical={false} strokeDasharray="4 5" />
               <XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(value) => `${Number(value).toFixed(1)}s`} tick={axis} axisLine={false} tickLine={false} minTickGap={30} />
-              <YAxis yAxisId="temperature" tick={axis} axisLine={false} tickLine={false} width={42} domain={["dataMin - 2", "dataMax + 2"]} />
-              <YAxis yAxisId="pressure" orientation="right" tick={axis} axisLine={false} tickLine={false} width={42} domain={["dataMin - 2", "dataMax + 2"]} />
+              <YAxis yAxisId="left" tick={axis} axisLine={false} tickLine={false} width={42} domain={["auto", "auto"]} />
+              {series.length > 1 && <YAxis yAxisId="right" orientation="right" tick={axis} axisLine={false} tickLine={false} width={42} domain={["auto", "auto"]} />}
               <Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => `Simulator time ${Number(value).toFixed(1)} s`} />
-              <Line yAxisId="temperature" type="monotone" dataKey="temperature" name="Temperature (°C)" stroke="#ff9b62" strokeWidth={2.2} dot={timestampedRows.length === 1 ? { r: 4 } : false} activeDot={{ r: 5 }} isAnimationActive={false} />
-              <Line yAxisId="pressure" type="monotone" dataKey="pressure" name="Pressure (bar)" stroke="#6ac8ff" strokeWidth={2.2} dot={timestampedRows.length === 1 ? { r: 4 } : false} activeDot={{ r: 5 }} isAnimationActive={false} />
+              {series.map((item, index) => <Line key={item.key} yAxisId={index === 0 ? "left" : "right"} type="monotone" dataKey={item.key} name={item.label} stroke={colors[index % colors.length]} strokeWidth={2.2} dot={timestampedRows.length === 1 ? { r: 4 } : false} activeDot={{ r: 5 }} isAnimationActive={false} />)}
             </LineChart>
           </ResponsiveContainer>
         </div>
       ) : <div className="chart-empty">{history.length ? "Sensor samples are available, but simulator timestamps are missing." : "No simulator samples yet. Reset or advance a scenario to collect a sample."}</div>}
       {timestampedRows.length === 1 && <p className="chart-sample-note">One actual simulator snapshot at {timestampedRows[0].timestamp?.toFixed(1)} s; advance the simulation to build a trend.</p>}
-      <div className="chart-legend"><span><i className="chart-key temperature" />Temperature · °C</span><span><i className="chart-key pressure" />Pressure · bar</span></div>
+      <div className="chart-legend">{series.map((item, index) => <span key={item.key}><i className={`chart-key ${index === 0 ? "temperature" : "pressure"}`} />{item.label}</span>)}</div>
     </section>
   )
 }
 
 export function ThicknessTrendChart() {
-  const { history } = usePlantGuard()
+  const { history, industry } = usePlantGuard()
+  const signal = industry?.id === "plastic_extrusion" || !industry
+    ? { key: "thickness_mm", label: "Thickness", unit: "mm" }
+    : industry.sensors[2] ?? industry.sensors[0] ?? { key: "", label: "Sensor", unit: "" }
   const rows = history.slice(-36)
     .filter((reading): reading is Sensor & { timestamp_s: number } => typeof reading.timestamp_s === "number" && Number.isFinite(reading.timestamp_s))
-    .map((reading) => ({ timestamp: reading.timestamp_s, thickness: toNumber(reading.thickness_mm) }))
+    .map((reading) => ({ timestamp: reading.timestamp_s, value: toNumber(reading[signal.key]) }))
   return (
     <section className="card chart-card">
-      <div className="card-heading"><div><p className="eyebrow">SIMULATOR OUTPUT</p><h2>Thickness signal</h2><p className="heading-subtitle">Actual simulator timestamps · not a historian</p></div><span className="chart-unit">mm</span></div>
-      {rows.length ? <div className="chart-area chart-area-short"><ResponsiveContainer width="100%" height="100%"><LineChart data={rows} margin={{ top: 10, right: 12, bottom: 0, left: -12 }}><CartesianGrid stroke={grid} vertical={false} strokeDasharray="4 5" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(value) => `${Number(value).toFixed(1)}s`} tick={axis} axisLine={false} tickLine={false} /><YAxis tick={axis} axisLine={false} tickLine={false} width={45} domain={["auto", "auto"]} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => `Simulator time ${Number(value).toFixed(1)} s`} /><Line type="monotone" dataKey="thickness" name="Thickness (mm)" stroke="#9b8cff" strokeWidth={2.3} dot={rows.length === 1 ? { r: 4 } : false} activeDot={{ r: 5 }} isAnimationActive={false} /></LineChart></ResponsiveContainer></div> : <div className="chart-empty">{history.length ? "Sensor samples are available, but simulator timestamps are missing." : "No simulator samples yet. Reset or advance a scenario to collect a sample."}</div>}
+      <div className="card-heading"><div><p className="eyebrow">SIMULATOR OUTPUT</p><h2>{signal.label} signal</h2><p className="heading-subtitle">Actual simulator timestamps · not a historian</p></div><span className="chart-unit">{signal.unit}</span></div>
+      {rows.length ? <div className="chart-area chart-area-short"><ResponsiveContainer width="100%" height="100%"><LineChart data={rows} margin={{ top: 10, right: 12, bottom: 0, left: -12 }}><CartesianGrid stroke={grid} vertical={false} strokeDasharray="4 5" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(value) => `${Number(value).toFixed(1)}s`} tick={axis} axisLine={false} tickLine={false} /><YAxis tick={axis} axisLine={false} tickLine={false} width={45} domain={["auto", "auto"]} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => `Simulator time ${Number(value).toFixed(1)} s`} /><Line type="monotone" dataKey="value" name={`${signal.label}${signal.unit ? ` (${signal.unit})` : ""}`} stroke="#9b8cff" strokeWidth={2.3} dot={rows.length === 1 ? { r: 4 } : false} activeDot={{ r: 5 }} isAnimationActive={false} /></LineChart></ResponsiveContainer></div> : <div className="chart-empty">{history.length ? "Sensor samples are available, but simulator timestamps are missing." : "No simulator samples yet. Reset or advance the simulation to collect a sample."}</div>}
       {rows.length === 1 && <p className="chart-sample-note">One actual simulator snapshot at {rows[0].timestamp.toFixed(1)} s; advance the simulation to build a trend.</p>}
     </section>
   )
 }
 
-export function RiskDistributionChart({ risk }: { risk: Record<RiskKey, number> | undefined }) {
-  const rows = risk ? [
-    { label: "Surface cracking", value: risk.surface_cracking },
-    { label: "Warping", value: risk.warping },
-    { label: "Thickness variation", value: risk.thickness_non_uniformity },
-  ] : []
+export function RiskDistributionChart({ risk, categories }: { risk: Record<RiskKey, number> | undefined; categories?: Array<{ id: string; label: string }> }) {
+  const fallbackCategories = [
+    { id: "surface_cracking", label: "Surface cracking" },
+    { id: "warping", label: "Warping" },
+    { id: "thickness_non_uniformity", label: "Thickness variation" },
+  ]
+  const rows = risk ? (categories ?? fallbackCategories)
+    .filter(({ id }) => typeof risk[id] === "number")
+    .map(({ id, label }) => ({ label, value: risk[id] })) : []
   return (
     <section className="card chart-card">
-      <div className="card-heading"><div><p className="eyebrow">CURRENT MODEL OUTPUT</p><h2>Current defect-risk scores</h2><p className="heading-subtitle">Current outputs on a 0–1 scale · calibration to probabilities is not established; not a historical trend.</p></div></div>
+      <div className="card-heading"><div><p className="eyebrow">CURRENT SIMULATED OUTPUT</p><h2>Current defect-risk scores</h2><p className="heading-subtitle">Current rule or model outputs on a 0–1 scale · calibration to probabilities is not established; not a historical trend.</p></div></div>
       {rows.length ? <div className="chart-area chart-area-short"><ResponsiveContainer width="100%" height="100%"><BarChart data={rows} layout="vertical" margin={{ top: 6, right: 16, bottom: 0, left: 16 }}><CartesianGrid stroke={grid} horizontal={false} /><XAxis type="number" domain={[0, 1]} tickFormatter={(value) => Number(value).toFixed(1)} tick={axis} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="label" width={112} tick={axis} axisLine={false} tickLine={false} /><Tooltip contentStyle={tooltipStyle} formatter={(value) => [Number(value).toFixed(3), "Model risk score"]} /><Bar dataKey="value" name="Model risk score" fill="#63c7e8" radius={[0, 6, 6, 0]} isAnimationActive={false} /></BarChart></ResponsiveContainer></div> : <div className="chart-empty">Risk data unavailable until the API responds.</div>}
     </section>
   )
@@ -80,7 +96,7 @@ export function RiskDistributionChart({ risk }: { risk: Record<RiskKey, number> 
 export function ModelMetricCard({ name, metrics }: { name: string; metrics: ModelMetrics }) {
   return (
     <section className="card model-metric-card">
-      <div className="card-heading"><div><p className="eyebrow">{name === "PINN" ? "PHYSICS-INFORMED MODEL" : "SEQUENCE BASELINE"}</p><h2>{name}</h2></div><span className="tag tag-info">Synthetic holdout</span></div>
+      <div className="card-heading"><div><p className="eyebrow">{name === "PINN" ? "PHYSICS-PROXY-GUIDED NEURAL NETWORK" : "SEQUENCE BASELINE"}</p><h2>{name}</h2></div><span className="tag tag-info">Synthetic holdout</span></div>
       <div className="metric-pair">
         <div><span>Held-out MAE</span><strong>{metrics.mae.toFixed(4)}</strong></div>
         <div><span>Held-out MSE</span><strong>{metrics.mse.toFixed(4)}</strong></div>

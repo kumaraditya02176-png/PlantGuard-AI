@@ -8,7 +8,7 @@ export const metadata: Metadata = {
     default: "PlantGuard AI | Quality Intelligence",
     template: "%s | PlantGuard AI",
   },
-  description: "Simulation-only process quality intelligence for extrusion operations.",
+  description: "Simulation-only process quality intelligence across six manufacturing industry modules.",
   icons: { icon: "/icon.svg" },
 }
 

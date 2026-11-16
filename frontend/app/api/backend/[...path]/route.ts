@@ -22,6 +22,7 @@ const readRoutes = new Set([
   "/api/v1/advisory/latest",
   "/api/v1/metrics",
   "/api/v1/roi",
+  "/api/v1/industries",
   "/docs",
   "/openapi.json",
 ])
@@ -31,6 +32,7 @@ const mutationRoutes = new Set([
   "/api/v1/simulation/inject",
   "/api/v1/simulation/advance",
 ])
+const industryRoute = /^\/api\/v1\/industries\/(?:plastic_extrusion|paper_pulp|steel_metals|chemical_process|food_beverage|pharmaceutical)\/(dashboard|simulation\/(?:reset|inject|advance)|advisories\/apply)$/
 type RouteContext = { params: Promise<{ path: string[] }> }
 
 export async function GET(request: Request, context: RouteContext) {
@@ -44,7 +46,10 @@ export async function POST(request: Request, context: RouteContext) {
 async function proxyRequest(request: Request, context: RouteContext, method: "GET" | "POST") {
   const { path } = await context.params
   const upstreamPath = `/${path.join("/")}`
-  const permitted = method === "GET" ? readRoutes.has(upstreamPath) : mutationRoutes.has(upstreamPath)
+  const industryMatch = industryRoute.exec(upstreamPath)
+  const permitted = method === "GET"
+    ? readRoutes.has(upstreamPath) || industryMatch?.[1] === "dashboard"
+    : mutationRoutes.has(upstreamPath) || Boolean(industryMatch && industryMatch[1] !== "dashboard")
   if (!permitted) return NextResponse.json({ detail: "API route is not available through this application." }, { status: 404 })
 
   const headers = new Headers({ Accept: "application/json" })

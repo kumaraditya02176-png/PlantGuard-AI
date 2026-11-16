@@ -8,9 +8,24 @@ export const scenarioOptions = [
 ] as const
 
 export type ScenarioId = (typeof scenarioOptions)[number]["id"]
-export type RiskKey = "surface_cracking" | "warping" | "thickness_non_uniformity"
+export type RiskKey = string
 export type Sensor = Record<string, number | string | null> & { timestamp_s?: number }
-export type RiskMap = Record<RiskKey, number>
+export type RiskMap = Record<string, number>
+
+export type IndustryMetadata = {
+  id: string
+  name: string
+  description: string
+  simulation_only: true
+  equipment: Array<{ id: string; name: string; description: string; sensor_keys: string[] }>
+  sensors: Array<{ key: string; label: string; unit: string; minimum: number; maximum: number }>
+  scenarios: Array<{ id: string; label: string; note: string }>
+  defects: Array<{ id: string; label: string; note: string }>
+  risk_categories: Array<{ id: string; label: string }>
+  risk_method: string
+}
+
+export type IndustryCatalogResponse = { industries: IndustryMetadata[] }
 
 export type Advisory = {
   defect: string
@@ -22,6 +37,7 @@ export type Advisory = {
   target_process_variable: string
   suggested_adjustment: number
   duration_s: number
+  source?: string
 }
 
 export type CorrectionResult = {
@@ -36,17 +52,18 @@ export type CorrectionResult = {
 export type Dashboard = {
   simulation: {
     time_s: number
-    active_scenario: { type: ScenarioId } | null
+    active_scenario: { type: string } | null
     latest_sensor: Sensor
     sensor_history?: Sensor[]
     controls: Record<string, number>
   }
   risk: {
     risk: RiskMap
-    risk_bands?: Record<RiskKey, string>
+    risk_bands?: Record<string, string>
     overall_risk: number
     risk_band: string
-    lead_time_estimate_s: number
+    lead_time_estimate_s: number | null
+    method?: string
     model_comparison?: {
       primary_model: "pinn"
       lstm_status: "active" | "warming_up"
@@ -54,6 +71,7 @@ export type Dashboard = {
     }
   }
   advisory: Advisory
+  industry?: IndustryMetadata
   correction_result?: CorrectionResult
   notice: string
 }
@@ -134,7 +152,7 @@ export function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-export function formatSensorValue(key: string, value: number | string | null | undefined): string {
+export function formatSensorValue(key: string, value: number | string | null | undefined, unit?: string): string {
   const number = toNumber(value)
   const formats: Record<string, [number, string]> = {
     temperature_c: [1, "°C"],
@@ -147,9 +165,10 @@ export function formatSensorValue(key: string, value: number | string | null | u
     line_speed_m_min: [1, "m/min"],
     cooling_efficiency: [0, "%"],
   }
-  const [digits, unit] = formats[key] ?? [2, ""]
+  const [digits, defaultUnit] = formats[key] ?? [2, ""]
   const formatted = key === "cooling_efficiency" ? `${Math.round(number * 100)}` : number.toFixed(digits)
-  return `${formatted}${unit ? ` ${unit}` : ""}`
+  const displayUnit = unit ?? defaultUnit
+  return `${formatted}${displayUnit ? ` ${displayUnit}` : ""}`
 }
 
 export function formatAdjustment(advisory: Advisory | undefined): string {

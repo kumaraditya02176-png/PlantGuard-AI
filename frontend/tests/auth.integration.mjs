@@ -9,7 +9,9 @@ const mutationToken = required("PLANTGUARD_MUTATION_TOKEN")
 const operatorUsername = required("PLANTGUARD_OPERATOR_USERNAME")
 const operatorPassword = required("PHASE10_3_OPERATOR_PASSWORD")
 const expectedSecureCookie = process.env.PHASE10_3_EXPECT_SECURE === "true"
-const publicOrigin = new URL(required("PLANTGUARD_PUBLIC_ORIGIN")).origin
+const configuredOrigin = required("PLANTGUARD_PUBLIC_ORIGIN")
+assert.equal(configuredOrigin, "http://127.0.0.1:3102")
+const publicOrigin = new URL(configuredOrigin).origin
 const redis = createClient({ url: sessionStoreUrl })
 redis.on("error", () => console.error("Test session store connection failed."))
 await redis.connect()
@@ -44,6 +46,50 @@ async function sensorSnapshot() {
 
 async function main() {
   assert.equal((await fetch(new URL("/health", backendUrl))).status, 200)
+
+  const canonicalOriginProbe = await fetch(new URL("/api/auth", frontendUrl), {
+    method: "POST",
+    headers: { ...requestHeaders(), "content-type": "text/plain" },
+    body: "origin-diagnostic",
+  })
+  assert.equal(canonicalOriginProbe.status, 415)
+  const localhostOriginProbe = await fetch(new URL("/api/auth", frontendUrl), {
+    method: "POST",
+    headers: { ...requestHeaders("http://localhost:3102"), "content-type": "text/plain" },
+    body: "origin-diagnostic",
+  })
+  assert.equal(localhostOriginProbe.status, 403)
+  const localhostHostProbe = await fetch(new URL("/api/auth", frontendUrl), {
+    method: "POST",
+    headers: {
+      ...requestHeaders(),
+      host: "localhost:3102",
+      "content-type": "text/plain",
+    },
+    body: "origin-diagnostic",
+  })
+  assert.equal(localhostHostProbe.status, 403)
+  const forwardedHostProbe = await fetch(new URL("/api/auth", frontendUrl), {
+    method: "POST",
+    headers: {
+      ...requestHeaders(),
+      "x-forwarded-host": "localhost:3102",
+      "content-type": "text/plain",
+    },
+    body: "origin-diagnostic",
+  })
+  assert.equal(forwardedHostProbe.status, 403)
+  const forwardedProtocolProbe = await fetch(new URL("/api/auth", frontendUrl), {
+    method: "POST",
+    headers: {
+      ...requestHeaders(),
+      "x-forwarded-proto": "https",
+      "content-type": "text/plain",
+    },
+    body: "origin-diagnostic",
+  })
+  assert.equal(forwardedProtocolProbe.status, 403)
+  console.log("PASS canonical origin accepted; mismatched host and forwarded headers rejected")
 
   const missingCredentials = await fetch(new URL("/api/auth", frontendUrl), {
     method: "POST",
@@ -93,6 +139,15 @@ async function main() {
   let sessionKey = `pg:session:${createHash("sha256").update(sessionId).digest("hex")}`
   assert.ok(await redis.exists(sessionKey))
   console.log("PASS valid login creates opaque Redis session and correct cookie attributes")
+
+  const activeSessionStatus = await fetch(new URL("/api/auth", frontendUrl), {
+    headers: { ...requestHeaders(), cookie: cookiePair },
+  })
+  assert.equal(activeSessionStatus.status, 200)
+  const activeSessionBody = await activeSessionStatus.json()
+  assert.equal(activeSessionBody.authorized, true)
+  assert.equal(activeSessionBody.csrfToken, loginBody.csrfToken)
+  console.log("PASS authenticated session persists across requests")
 
   const sessionCookieName = expectedSecureCookie ? "__Host-plantguard-session" : "plantguard-session"
   const invalidSession = await fetch(new URL("/api/auth", frontendUrl), {
@@ -184,8 +239,49 @@ async function main() {
     body: JSON.stringify({ scenario: nextScenario }),
   })
   assert.equal(reset.status, 200)
+  const resetDashboard = await reset.json()
+  assert.equal(resetDashboard.simulation.active_scenario.type, nextScenario)
   assert.notDeepEqual(await sensorSnapshot(), beforeUnauthorized)
-  console.log("PASS authorized CSRF-protected simulator mutation")
+  console.log("PASS authorized CSRF-protected scenario selection")
+
+  const injection = await fetch(new URL("/api/backend/api/v1/simulation/inject", frontendUrl), {
+    method: "POST",
+    headers: {
+      ...requestHeaders(),
+      cookie: cookiePair,
+      "x-csrf-token": loginBody.csrfToken,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ defect: "surface_cracking" }),
+  })
+  assert.equal(injection.status, 200)
+  const injectedDashboard = await injection.json()
+  assert.equal(injectedDashboard.simulation.active_scenario.type, nextScenario)
+  assert.ok(injectedDashboard.simulation.sensor_history.length > resetDashboard.simulation.sensor_history.length)
+  console.log("PASS authenticated defect injection updates dashboard sensor history")
+
+  const advance = await fetch(new URL("/api/backend/api/v1/simulation/advance", frontendUrl), {
+    method: "POST",
+    headers: {
+      ...requestHeaders(),
+      cookie: cookiePair,
+      "x-csrf-token": loginBody.csrfToken,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ dt: 1, steps: 2 }),
+  })
+  assert.equal(advance.status, 200)
+  const advancedDashboard = await advance.json()
+  assert.equal(advancedDashboard.simulation.time_s, injectedDashboard.simulation.time_s + 2)
+  assert.equal(
+    advancedDashboard.simulation.sensor_history.length,
+    injectedDashboard.simulation.sensor_history.length + 2,
+  )
+  assert.notDeepEqual(
+    advancedDashboard.simulation.latest_sensor,
+    injectedDashboard.simulation.latest_sensor,
+  )
+  console.log("PASS authenticated Advance Simulation changes readings and returns graph points")
 
   await redis.expire(sessionKey, 1)
   await new Promise((resolve) => setTimeout(resolve, 1200))
@@ -216,6 +312,9 @@ async function main() {
     headers: { ...requestHeaders(), cookie: logoutPair, "x-csrf-token": logoutBody.csrfToken },
   })
   assert.equal(logoutResponse.status, 200)
+  const clearedCookie = logoutResponse.headers.getSetCookie().find((value) => value.startsWith(sessionCookieName + "="))
+  assert.ok(clearedCookie)
+  assert.match(clearedCookie, /Max-Age=0/i)
   assert.equal(await redis.exists(logoutKey), 0)
   assert.equal((await (await fetch(new URL("/api/auth", frontendUrl), {
     headers: { ...requestHeaders(), cookie: logoutPair },

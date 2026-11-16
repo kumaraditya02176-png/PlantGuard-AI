@@ -7,6 +7,8 @@ export const MUTATION_SESSION_COOKIE = "plantguard-session"
 export const MUTATION_SESSION_SECONDS = 30 * 60
 export const LOGIN_ATTEMPT_LIMIT = 5
 export const LOGIN_WINDOW_SECONDS = 15 * 60
+const LOCAL_DEMO_ORIGIN = "http://127.0.0.1:3102"
+const LOCAL_DEMO_HOST = "127.0.0.1:3102"
 
 type OperatorSession = {
   csrfToken: string
@@ -19,14 +21,7 @@ export function backendApiUrl(request: Request): URL | null {
   const configured = process.env.PLANTGUARD_API_URL
   let value = configured
   if (value === undefined && process.env.NODE_ENV !== "production") {
-    const host = request.headers.get("host")
-    if (!host) return null
-    try {
-      const port = new URL(`http://${host}`).port
-      value = port === "3102" ? "http://127.0.0.1:8002" : "http://127.0.0.1:8001"
-    } catch {
-      return null
-    }
+    value = "http://127.0.0.1:8001"
   }
   if (!value) return null
   try {
@@ -85,12 +80,24 @@ export function isSameOriginRequest(request: Request): boolean {
   if (!origin || !expected || fetchSite && fetchSite !== "same-origin") return false
   try {
     const requestUrl = new URL(request.url)
+    const authEnvironment = process.env.PLANTGUARD_AUTH_ENV
     const trustProxy = process.env.PLANTGUARD_TRUST_PROXY === "true"
+    const forwardedHost = request.headers.get("x-forwarded-host")
     const forwardedProtocol = request.headers.get("x-forwarded-proto")
-    if (process.env.PLANTGUARD_AUTH_ENV === "production" && forwardedProtocol && !trustProxy) return false
+    if (authEnvironment === "development") {
+      // Next can reconstruct Request.url with its internal hostname instead of the incoming Host.
+      if (
+        expected.origin !== LOCAL_DEMO_ORIGIN
+        || requestUrl.protocol !== "http:"
+        || request.headers.get("host") !== LOCAL_DEMO_HOST
+        || (forwardedHost !== null && forwardedHost !== LOCAL_DEMO_HOST)
+        || (forwardedProtocol !== null && forwardedProtocol !== "http")
+      ) return false
+    }
+    if (authEnvironment === "production" && forwardedProtocol && !trustProxy) return false
     const secureTransport = requestUrl.protocol === "https:"
       || trustProxy && forwardedProtocol === "https"
-    if (process.env.PLANTGUARD_AUTH_ENV === "production" && !secureTransport) return false
+    if (authEnvironment === "production" && !secureTransport) return false
     return new URL(origin).origin === expected.origin && origin === expected.origin
   } catch {
     return false
@@ -245,7 +252,7 @@ function configuredPublicOrigin(): URL | null {
 }
 
 function isLoopbackOrigin(url: URL | null): boolean {
-  return Boolean(url && url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
+  return url?.origin === LOCAL_DEMO_ORIGIN
 }
 
 function parseSessionStoreUrl(): URL | null {

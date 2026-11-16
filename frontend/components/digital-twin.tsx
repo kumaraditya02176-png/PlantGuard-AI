@@ -4,6 +4,7 @@ import dynamic from "next/dynamic"
 import Link from "next/link"
 import { useEffect, useState } from "react"
 import { usePlantGuard } from "@/components/app-provider"
+import { IndustryDigitalTwin } from "@/components/industry-digital-twin"
 import { formatSensorValue, riskBand, toNumber } from "@/lib/plantguard"
 import type { FactoryRiskBand, FactoryStation } from "@/components/factory-twin-3d"
 
@@ -23,6 +24,14 @@ function stationBand(kind: string, value: number, fallback: FactoryRiskBand): Fa
 }
 
 export function DigitalTwin() {
+  const { industry } = usePlantGuard()
+  if (industry && industry.id !== "plastic_extrusion") {
+    return <IndustryDigitalTwin industry={industry} />
+  }
+  return <ExtrusionDigitalTwin />
+}
+
+function ExtrusionDigitalTwin() {
   const { dashboard } = usePlantGuard()
   const [webglAvailable, setWebglAvailable] = useState<boolean | null>(null)
   const sensor = dashboard?.simulation.latest_sensor

@@ -1,10 +1,19 @@
 "use client"
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { apiRequest, type Dashboard, type MetricsResponse, type ScenarioId, type Sensor } from "@/lib/plantguard"
+import {
+  apiRequest,
+  type Dashboard,
+  type IndustryCatalogResponse,
+  type IndustryMetadata,
+  type MetricsResponse,
+  type Sensor,
+} from "@/lib/plantguard"
 
 type AppContextValue = {
   dashboard: Dashboard | null
+  industry: IndustryMetadata | null
+  industries: IndustryMetadata[]
   history: Sensor[]
   metrics: MetricsResponse | null
   online: boolean
@@ -15,7 +24,8 @@ type AppContextValue = {
   refresh: () => Promise<void>
   authorizeMutations: (username: string, password: string) => Promise<void>
   revokeMutationAuthorization: () => Promise<void>
-  resetScenario: (scenario: ScenarioId) => Promise<void>
+  selectIndustry: (industryId: string) => void
+  resetScenario: (scenario: string) => Promise<void>
   injectDefect: (defect: string) => Promise<void>
   advance: () => Promise<void>
   applyAdvisory: () => Promise<void>
@@ -25,6 +35,8 @@ const AppContext = createContext<AppContextValue | null>(null)
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null)
+  const [industries, setIndustries] = useState<IndustryMetadata[]>([])
+  const [selectedIndustryId, setSelectedIndustryId] = useState("plastic_extrusion")
   const [history, setHistory] = useState<Sensor[]>([])
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null)
   const [online, setOnline] = useState(false)
@@ -34,25 +46,54 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [csrfToken, setCsrfToken] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
   const inFlight = useRef(false)
+  const refreshQueued = useRef(false)
+  const selectedIndustryIdRef = useRef(selectedIndustryId)
+  const refreshRef = useRef<() => Promise<void>>(async () => {})
   const metricsLoadedAt = useRef(0)
+  selectedIndustryIdRef.current = selectedIndustryId
 
   const refresh = useCallback(async () => {
-    if (inFlight.current) return
+    if (inFlight.current) {
+      refreshQueued.current = true
+      return
+    }
     inFlight.current = true
     try {
-      const [dash, health] = await Promise.all([
-        apiRequest<Dashboard>("/api/v1/dashboard"),
+      let catalog = industries
+      if (!catalog.length) {
+        const response = await apiRequest<IndustryCatalogResponse>("/api/v1/industries")
+        if (!Array.isArray(response.industries) || !response.industries.length) {
+          throw new Error("Backend returned no simulated industry modules.")
+        }
+        catalog = response.industries
+        setIndustries(catalog)
+      }
+      const requestIndustryId = selectedIndustryIdRef.current
+      const selectedIndustry = catalog.find((item) => item.id === requestIndustryId)
+      if (!selectedIndustry || selectedIndustry.simulation_only !== true) {
+        throw new Error("The selected simulation module is not available from the backend.")
+      }
+      const dashboardPath = requestIndustryId === "plastic_extrusion"
+        ? "/api/v1/dashboard"
+        : `/api/v1/industries/${encodeURIComponent(requestIndustryId)}/dashboard`
+      const [rawDashboard, health] = await Promise.all([
+        apiRequest<Dashboard>(dashboardPath),
         apiRequest<{ status: string; simulation_only: boolean }>("/health"),
       ])
       if (health.status !== "ok" || health.simulation_only !== true) {
         throw new Error("Backend health check did not confirm simulation-only mode.")
       }
+      if (selectedIndustryIdRef.current !== requestIndustryId) {
+        refreshQueued.current = true
+        return
+      }
+      const dash = { ...rawDashboard, industry: rawDashboard.industry ?? selectedIndustry }
       setDashboard(dash)
       setHistory(dash.simulation.sensor_history ?? [])
       setOnline(true)
       setUpdatedAt(new Date())
       setError(null)
-      if (!metrics || Date.now() - metricsLoadedAt.current > 60_000) {
+      if (requestIndustryId === "plastic_extrusion" && (!metrics || Date.now() - metricsLoadedAt.current > 60_000)) {
         try {
           const nextMetrics = await apiRequest<MetricsResponse>("/api/v1/metrics")
           setMetrics(nextMetrics)
@@ -66,8 +107,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setError(reason instanceof Error ? reason.message : "Backend is unavailable.")
     } finally {
       inFlight.current = false
+      if (refreshQueued.current) {
+        refreshQueued.current = false
+        window.setTimeout(() => void refreshRef.current(), 0)
+      }
     }
-  }, [metrics])
+  }, [industries, metrics])
+  refreshRef.current = refresh
 
   useEffect(() => {
     let active = true
@@ -137,7 +183,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch (reason) {
       throw reason instanceof Error ? reason : new Error("Could not revoke the operator session.")
     }
-  }, [])
+  }, [csrfToken])
+
+  const selectIndustry = useCallback((industryId: string) => {
+    const nextIndustry = industries.find((item) => item.id === industryId)
+    if (!nextIndustry) {
+      setError("The selected simulation module is not available from the backend.")
+      return
+    }
+    selectedIndustryIdRef.current = industryId
+    setSelectedIndustryId(industryId)
+    setDashboard(null)
+    setHistory([])
+    setError(null)
+    if (inFlight.current) refreshQueued.current = true
+    else void refreshRef.current()
+  }, [industries])
 
   const command = useCallback(async (key: string, path: string, body?: object) => {
     if (busy) return
@@ -147,25 +208,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     setBusy(key)
     setError(null)
+    const requestIndustryId = selectedIndustryIdRef.current
+    const requestPath = requestIndustryId === "plastic_extrusion"
+      ? path
+      : `/api/v1/industries/${encodeURIComponent(requestIndustryId)}${path.replace(/^\/api\/v1/, "")}`
     try {
-      const result = await apiRequest<Dashboard>(path, {
+      const response = await apiRequest<Dashboard>(requestPath, {
         method: "POST",
         headers: csrfToken ? { "X-CSRF-Token": csrfToken } : {},
         body: JSON.stringify(body ?? {}),
       })
+      if (selectedIndustryIdRef.current !== requestIndustryId) {
+        refreshQueued.current = true
+        return
+      }
+      const result = {
+        ...response,
+        industry: response.industry ?? industries.find((item) => item.id === requestIndustryId),
+      }
       setDashboard(result)
       setHistory(result.simulation.sensor_history ?? [])
       setOnline(true)
       setUpdatedAt(new Date())
+      setError(null)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The requested action failed.")
     } finally {
       setBusy(null)
     }
-  }, [busy, mutationAuthorized, csrfToken])
+  }, [busy, mutationAuthorized, csrfToken, industries])
 
+  const industry = industries.find((item) => item.id === selectedIndustryId) ?? null
   const value = useMemo<AppContextValue>(() => ({
     dashboard,
+    industry,
+    industries,
     history,
     metrics,
     online,
@@ -176,11 +253,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     refresh,
     authorizeMutations,
     revokeMutationAuthorization,
+    selectIndustry,
     resetScenario: (scenario) => command(`scenario:${scenario}`, "/api/v1/simulation/reset", { scenario }),
     injectDefect: (defect) => command(`defect:${defect}`, "/api/v1/simulation/inject", { defect }),
     advance: () => command("advance", "/api/v1/simulation/advance", { dt: 1, steps: 2 }),
     applyAdvisory: () => command("advisory", "/api/v1/advisories/apply"),
-  }), [dashboard, history, metrics, online, busy, error, mutationAuthorized, updatedAt, refresh, authorizeMutations, revokeMutationAuthorization, command])
+  }), [dashboard, industry, industries, history, metrics, online, busy, error, mutationAuthorized, updatedAt, refresh, authorizeMutations, revokeMutationAuthorization, selectIndustry, command])
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
 }

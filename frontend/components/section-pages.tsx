@@ -13,7 +13,7 @@ import { ModelComparisonChart, ModelMetricCard, RiskDistributionChart, SensorTre
 import { Icon } from "@/components/icon"
 import {
   formatAdjustment, formatPercent, formatSensorValue, getApiBaseUrl, riskBand,
-  scenarioOptions, titleCase, toNumber, type RoiEstimate, type RiskKey,
+  scenarioOptions, titleCase, toNumber, type IndustryMetadata, type RoiEstimate, type RiskKey, type Sensor,
 } from "@/lib/plantguard"
 
 const riskLabels: Record<RiskKey, string> = {
@@ -33,6 +33,10 @@ const sensorDefinitions = [
   ["line_speed_m_min", "Line speed", "m/min"],
   ["cooling_efficiency", "Cooling efficiency", "%"],
 ] as const
+
+function riskCategories(industry: IndustryMetadata | null | undefined): Array<{ id: RiskKey; label: string }> {
+  return industry?.risk_categories ?? Object.entries(riskLabels).map(([id, label]) => ({ id, label }))
+}
 
 function PageIntro({ eyebrow, title, copy, action }: { eyebrow: string; title: string; copy: string; action?: React.ReactNode }) {
   return <div className="page-intro"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{copy}</p></div>{action && <div className="page-intro-action">{action}</div>}</div>
@@ -58,15 +62,18 @@ function StatusTag({ label, status }: { label: string; status: string }) {
 }
 
 function SensorValueCards({ compact = false }: { compact?: boolean }) {
-  const { dashboard } = usePlantGuard()
+  const { dashboard, industry } = usePlantGuard()
   const sensor = dashboard?.simulation.latest_sensor
-  const rows = compact ? sensorDefinitions.slice(0, 4) : sensorDefinitions
+  const definitions = industry?.id === "plastic_extrusion" || !industry
+    ? sensorDefinitions
+    : industry.sensors.map(({ key, label, unit }) => [key, label, unit] as const)
+  const rows = compact ? definitions.slice(0, 4) : definitions
   return (
     <div className={`sensor-kpi-grid ${compact ? "sensor-kpi-grid-compact" : ""}`}>
-      {rows.map(([key, label]) => (
+      {rows.map(([key, label, unit]) => (
         <article className="sensor-kpi" key={key}>
           <div className="sensor-kpi-head"><span>{label}</span><span className={`sensor-health ${sensor ? "connected" : "disconnected"}`} /></div>
-          <strong>{sensor ? formatSensorValue(key, sensor[key]) : "—"}</strong>
+          <strong>{sensor ? formatSensorValue(key, sensor[key], unit) : "—"}</strong>
           <small>{sensor ? "Simulated sensor" : "Waiting for API"}</small>
         </article>
       ))}
@@ -75,17 +82,17 @@ function SensorValueCards({ compact = false }: { compact?: boolean }) {
 }
 
 export function OverviewPage() {
-  const { dashboard, online, metrics } = usePlantGuard()
+  const { dashboard, industry, online, metrics } = usePlantGuard()
   const risk = dashboard?.risk
   const total = risk?.overall_risk
   return (
     <>
-      <PageIntro eyebrow="PLANT OPERATIONS / SIMULATION" title="Quality intelligence, at a glance." copy="Physics-aware process monitoring for continuous extrusion. All readings and risk estimates on this workspace are simulated." action={<Link className="button button-primary" href="/simulation"><Icon name="simulation" /> Open simulation lab</Link>} />
+      <PageIntro eyebrow="PLANT OPERATIONS / SIMULATION" title="Quality intelligence, at a glance." copy={`${industry?.name ?? "Manufacturing"} process monitoring. Readings, risk estimates, and process responses are simulated.`} action={<Link className="button button-primary" href="/simulation"><Icon name="simulation" /> Open simulation lab</Link>} />
       <div className="overview-kpis">
-        <article className="kpi-card kpi-featured"><div className="kpi-heading"><span>Overall defect risk</span><span className={`kpi-icon ${risk ? riskBand(risk.overall_risk) : ""}`}><Icon name="activity" /></span></div><strong>{total === undefined ? "—" : formatPercent(total)}</strong><div className="kpi-foot"><StatusTag label={risk?.risk_band ?? "Waiting"} status={risk ? riskBand(risk.overall_risk) : "offline"} /><span>Current model estimate</span></div></article>
+        <article className="kpi-card kpi-featured"><div className="kpi-heading"><span>Overall defect risk</span><span className={`kpi-icon ${risk ? riskBand(risk.overall_risk) : ""}`}><Icon name="activity" /></span></div><strong>{total === undefined ? "—" : formatPercent(total)}</strong><div className="kpi-foot"><StatusTag label={risk?.risk_band ?? "Waiting"} status={risk ? riskBand(risk.overall_risk) : "offline"} /><span>{industry?.id === "plastic_extrusion" ? "Current model estimate" : "Current simulated estimate"}</span></div></article>
         <article className="kpi-card"><div className="kpi-heading"><span>Process state</span><span className="kpi-icon blue"><Icon name="simulation" /></span></div><strong className="kpi-text">{dashboard?.simulation.active_scenario ? titleCase(dashboard.simulation.active_scenario.type) : "Connecting"}</strong><div className="kpi-foot"><span>Digital twin scenario</span><span className="kpi-value-note">SIMULATED</span></div></article>
-        <article className="kpi-card"><div className="kpi-heading"><span>Model visibility estimate</span><span className="kpi-icon violet"><Icon name="analytics" /></span></div><strong>{risk ? `${Math.round(risk.lead_time_estimate_s)}s` : "—"}</strong><div className="kpi-foot"><span>Heuristic estimate, not measured lead time</span></div></article>
-        <article className="kpi-card"><div className="kpi-heading"><span>Backend connection</span><span className={`kpi-icon ${online ? "green" : "red"}`}><Icon name="integrations" /></span></div><strong className="kpi-text">{online ? "Connected" : "Unavailable"}</strong><div className="kpi-foot"><span>{metrics ? "PINN / LSTM metrics loaded" : "Model metrics pending"}</span><span className={`status-dot ${online ? "online" : "offline"}`} /></div></article>
+        <article className="kpi-card"><div className="kpi-heading"><span>Lead-time estimate</span><span className="kpi-icon violet"><Icon name="analytics" /></span></div><strong>{risk?.lead_time_estimate_s == null ? "Not estimated" : `${Math.round(risk.lead_time_estimate_s)}s`}</strong><div className="kpi-foot"><span>{risk?.lead_time_estimate_s == null ? "Not available for this module" : "Heuristic estimate, not measured lead time"}</span></div></article>
+        <article className="kpi-card"><div className="kpi-heading"><span>Backend connection</span><span className={`kpi-icon ${online ? "green" : "red"}`}><Icon name="integrations" /></span></div><strong className="kpi-text">{online ? "Connected" : "Unavailable"}</strong><div className="kpi-foot"><span>{industry?.id === "plastic_extrusion" ? (metrics ? "Extrusion PINN / LSTM metrics loaded" : "Extrusion model metrics pending") : "Industry-specific rules loaded"}</span><span className={`status-dot ${online ? "online" : "offline"}`} /></div></article>
       </div>
 
       <div className="overview-main-grid">
@@ -93,16 +100,16 @@ export function OverviewPage() {
         <section className="card overview-risk-card">
           <PanelTitle eyebrow="MODEL SIGNAL" title="Current defect risk" aside={<Link className="subtle-link" href="/analytics">Details <span aria-hidden="true">→</span></Link>} />
           <div className="risk-list">
-            {risk ? Object.entries(riskLabels).map(([key, label]) => <RiskCard key={key} label={label} value={risk.risk[key as RiskKey]} />) : <div className="inline-empty">Risk outputs appear when the API connects.</div>}
+            {risk ? riskCategories(industry).map(({ id, label }) => <RiskCard key={id} label={label} value={risk.risk[id]} />) : <div className="inline-empty">Risk outputs appear when the API connects.</div>}
           </div>
-          <div className="lead-time-callout"><span className="lead-time-icon"><Icon name="activity" /></span><span><strong>Estimated visibility window</strong><small>Simulator-derived estimate; requires empirical validation.</small></span><b>{risk ? `${Math.round(risk.lead_time_estimate_s)}s` : "—"}</b></div>
+          <div className="lead-time-callout"><span className="lead-time-icon"><Icon name="activity" /></span><span><strong>Lead-time estimate</strong><small>{risk?.lead_time_estimate_s == null ? "Not estimated for this industry's rule-based risk output." : "Simulator-derived heuristic; requires empirical validation."}</small></span><b>{risk?.lead_time_estimate_s == null ? "N/A" : `${Math.round(risk.lead_time_estimate_s)}s`}</b></div>
         </section>
       </div>
 
       <div className="dashboard-two-column">
         <SensorTrendChart compact />
         <section className="card current-advisory-card">
-          <PanelTitle eyebrow="ADVISORY ENGINE" title="Current model guidance" aside={<Link className="subtle-link" href="/advisory">Open advisory <span aria-hidden="true">→</span></Link>} />
+          <PanelTitle eyebrow="ADVISORY ENGINE" title="Current advisory guidance" aside={<Link className="subtle-link" href="/advisory">Open advisory <span aria-hidden="true">→</span></Link>} />
           {dashboard ? (
             <div className="advisory-summary">
               <div className="advisory-summary-head"><span className={`signal-icon ${riskBand(dashboard.advisory.risk)}`}><Icon name="advisory" /></span><div><span className="micro-label">Current signal</span><h3>{titleCase(dashboard.advisory.defect)}</h3></div><StatusTag label={dashboard.advisory.severity} status={riskBand(dashboard.advisory.risk)} /></div>
@@ -115,12 +122,12 @@ export function OverviewPage() {
       </div>
 
       <div className="dashboard-two-column">
-        <RiskDistributionChart risk={risk?.risk} />
+        <RiskDistributionChart risk={risk?.risk} categories={riskCategories(industry)} />
         <section className="card workflow-summary-card">
           <PanelTitle eyebrow="OPERATOR-LED PROCESS" title="Decision workflow" aside={<Link className="subtle-link" href="/workflows">View overview <span aria-hidden="true">→</span></Link>} />
           <div className="workflow-steps">
             <div className="workflow-step complete"><span>01</span><div><strong>Sensor sample</strong><small>Simulator state received</small></div><i /></div>
-            <div className="workflow-step complete"><span>02</span><div><strong>Risk evaluation</strong><small>{risk ? `Current risk: ${formatPercent(risk.overall_risk)}` : "Awaiting model output"}</small></div><i /></div>
+            <div className="workflow-step complete"><span>02</span><div><strong>Risk evaluation</strong><small>{risk ? `Current risk: ${formatPercent(risk.overall_risk)}` : "Awaiting risk output"}</small></div><i /></div>
             <div className="workflow-step current"><span>03</span><div><strong>Operator review</strong><small>Manual review required before action</small></div><i /></div>
             <div className="workflow-step unavailable"><span>04</span><div><strong>External automation</strong><small>Not connected or implemented</small></div></div>
           </div>
@@ -132,7 +139,7 @@ export function OverviewPage() {
 }
 
 export function AssetsPage() {
-  const { dashboard } = usePlantGuard()
+  const { dashboard, industry } = usePlantGuard()
   const sensor = dashboard?.simulation.latest_sensor
   const [stationSearch, setStationSearch] = useState("")
   const stations = [
@@ -142,6 +149,31 @@ export function AssetsPage() {
     ["Output gauge", "thickness_mm", "Product measurement", "Thickness / line speed"],
   ]
   const visibleStations = stations.filter((station) => station.join(" ").toLowerCase().includes(stationSearch.toLowerCase()))
+  if (industry && industry.id !== "plastic_extrusion") {
+    const visibleEquipment = industry.equipment.filter((equipment) =>
+      `${equipment.name} ${equipment.description} ${equipment.sensor_keys.join(" ")}`.toLowerCase().includes(stationSearch.toLowerCase()),
+    )
+    return (
+      <>
+        <PageIntro eyebrow="SIMULATED PROCESS / EQUIPMENT VIEW" title="Plant & assets" copy={`${industry.name} equipment and sensor associations are loaded from its independent backend module. This is not a physical asset registry.`} action={<span className="tag tag-info">{industry.equipment.length} simulated stations</span>} />
+        <div className="section-heading-row"><div><p className="eyebrow">PROCESS STATIONS</p><h2>{industry.name} equipment map</h2></div><label className="search-field"><Icon name="search" /><input value={stationSearch} onChange={(event) => setStationSearch(event.target.value)} aria-label="Search simulated process stations" placeholder="Filter stations" /></label></div>
+        <div className="asset-station-grid">
+          {visibleEquipment.map((equipment) => (
+            <article className="card asset-station-card" key={equipment.id}>
+              <span className="station-card-top"><span className="station-icon"><Icon name="assets" /></span><StatusTag label={sensor ? "Simulated" : "Unavailable"} status={sensor ? "info" : "offline"} /></span>
+              <h3>{equipment.name}</h3><p>{equipment.description}</p>
+              <div className="station-value">{equipment.sensor_keys.map((key) => {
+                const definition = industry.sensors.find((item) => item.key === key)
+                return <div key={key}><span>{sensor ? formatSensorValue(key, sensor[key], definition?.unit) : "—"}</span><small>{definition?.label ?? key}</small></div>
+              })}</div>
+            </article>
+          ))}
+          {!visibleEquipment.length && <div className="card inline-empty">No simulated process stations match this filter.</div>}
+        </div>
+        <section className="card"><PanelTitle eyebrow="DATA BOUNDARY" title="Simulated equipment only" /><div className="notice-list"><p>Equipment names and sensor links are module configuration, not verified factory assets.</p><p>No PLC, machine controller, or production equipment is connected.</p></div></section>
+      </>
+    )
+  }
   return (
     <>
       <PageIntro eyebrow="SIMULATED PROCESS / EQUIPMENT VIEW" title="Plant & assets" copy="The current backend models one extrusion process. Equipment stations below describe that simulator only; no physical asset registry is connected." action={<span className="tag tag-info">1 simulated process</span>} />
@@ -164,7 +196,7 @@ export function AssetsPage() {
 }
 
 export function AssetDetailPage({ assetId }: { assetId: string }) {
-  const { dashboard } = usePlantGuard()
+  const { dashboard, industry } = usePlantGuard()
   if (assetId !== "extrusion-line") return <PageIntro eyebrow="ASSET DETAIL" title="Asset unavailable" copy="This identifier does not refer to an asset exposed by the simulator." action={<Link className="button button-secondary" href="/assets">Return to assets</Link>} />
   const sensor = dashboard?.simulation.latest_sensor
   return (
@@ -172,45 +204,62 @@ export function AssetDetailPage({ assetId }: { assetId: string }) {
       <PageIntro eyebrow="SIMULATOR ASSET DETAIL" title="Simulated extrusion process" copy="A single in-memory process state from the local digital twin. No industrial asset connection is configured." action={<Link className="button button-secondary" href="/simulation">Open simulation <Icon name="arrow" /></Link>} />
       <div className="overview-kpis detail-kpis"><article className="kpi-card"><div className="kpi-heading"><span>Active scenario</span><span className="kpi-icon blue"><Icon name="simulation" /></span></div><strong className="kpi-text">{dashboard ? titleCase(dashboard.simulation.active_scenario?.type ?? "unknown") : "—"}</strong></article><article className="kpi-card"><div className="kpi-heading"><span>Overall risk</span><span className={`kpi-icon ${dashboard ? riskBand(dashboard.risk.overall_risk) : ""}`}><Icon name="activity" /></span></div><strong>{dashboard ? formatPercent(dashboard.risk.overall_risk) : "—"}</strong></article><article className="kpi-card"><div className="kpi-heading"><span>Simulation time</span><span className="kpi-icon violet"><Icon name="telemetry" /></span></div><strong>{dashboard ? `${dashboard.simulation.time_s.toFixed(0)} s` : "—"}</strong></article></div>
       <section className="card"><PanelTitle eyebrow="CURRENT TELEMETRY" title="Process sensor readings" /><SensorValueCards /></section>
-      <div className="dashboard-two-column"><SensorTrendChart /><RiskDistributionChart risk={dashboard?.risk.risk} /></div>
+      <div className="dashboard-two-column"><SensorTrendChart /><RiskDistributionChart risk={dashboard?.risk.risk} categories={riskCategories(industry)} /></div>
     </>
   )
 }
 
 export function TelemetryPage() {
-  const { dashboard } = usePlantGuard()
+  const { dashboard, industry } = usePlantGuard()
   return (
     <>
       <PageIntro eyebrow="SIMULATED SENSOR DATA" title="Live telemetry" copy="Sensor state is polled from the digital-twin API. It is not a real-time industrial sensor stream." action={<span className="tag tag-info">Polling API</span>} />
       <SensorValueCards />
       <div className="dashboard-two-column telemetry-charts"><SensorTrendChart /><ThicknessTrendChart /></div>
-      <section className="card"><PanelTitle eyebrow="SOURCE & FRESHNESS" title="Telemetry context" /><div className="detail-grid"><div><span>Source</span><strong>Backend extrusion simulator</strong></div><div><span>Scenario</span><strong>{dashboard?.simulation.active_scenario ? titleCase(dashboard.simulation.active_scenario.type) : "Unavailable"}</strong></div><div><span>Simulation clock</span><strong>{dashboard ? `${dashboard.simulation.time_s.toFixed(1)} seconds` : "—"}</strong></div><div><span>Sampling</span><strong>Current backend history</strong></div></div><p className="fine-print">The user interface refreshes its dashboard view periodically; this is not a streaming or guaranteed real-time telemetry service.</p></section>
+      <section className="card"><PanelTitle eyebrow="SOURCE & FRESHNESS" title="Telemetry context" /><div className="detail-grid"><div><span>Source</span><strong>{industry?.name ?? "Backend"} simulator</strong></div><div><span>Scenario</span><strong>{dashboard?.simulation.active_scenario ? titleCase(dashboard.simulation.active_scenario.type) : "Unavailable"}</strong></div><div><span>Simulation clock</span><strong>{dashboard ? `${dashboard.simulation.time_s.toFixed(1)} seconds` : "—"}</strong></div><div><span>Sampling</span><strong>Current backend history</strong></div></div><p className="fine-print">The user interface refreshes its dashboard view periodically; this is not a streaming or guaranteed real-time telemetry service.</p></section>
     </>
   )
 }
 
 export function AnalyticsPage() {
-  const { dashboard, metrics } = usePlantGuard()
+  const { dashboard, industry, metrics } = usePlantGuard()
   const risk = dashboard?.risk
+  if (industry && industry.id !== "plastic_extrusion") {
+    return (
+      <>
+        <PageIntro eyebrow="INDUSTRY-SPECIFIC SIMULATED RULES" title="AI analytics" copy={`${industry.name} currently uses configured deterministic risk rules. No PINN/LSTM training or industry-specific empirical evaluation is claimed for this module.`} />
+        <div className="overview-kpis analytics-kpis">
+          <article className="kpi-card"><div className="kpi-heading"><span>Overall simulated risk</span><span className="kpi-icon blue"><Icon name="activity" /></span></div><strong>{risk ? formatPercent(risk.overall_risk) : "—"}</strong><div className="kpi-foot"><span>Current backend rule output</span></div></article>
+          <article className="kpi-card"><div className="kpi-heading"><span>Risk method</span><span className="kpi-icon violet"><Icon name="analytics" /></span></div><strong className="kpi-text">Deterministic rules</strong><div className="kpi-foot"><span>Not a trained predictive model</span></div></article>
+          <article className="kpi-card"><div className="kpi-heading"><span>Lead-time estimate</span><span className="kpi-icon violet"><Icon name="analytics" /></span></div><strong>Not available</strong><div className="kpi-foot"><span>No empirical lead-time data</span></div></article>
+        </div>
+        <div className="risk-summary-grid">{risk && riskCategories(industry).map(({ id, label }) => <RiskCard key={id} label={label} value={risk.risk[id]} />)}</div>
+        <RiskDistributionChart risk={risk?.risk} categories={riskCategories(industry)} />
+        <section className="card"><PanelTitle eyebrow="MODEL SCOPE" title="Interpretation and limitations" /><div className="notice-list"><p>{industry.risk_method}</p><p>Risk values are simulated rule outputs and are not calibrated defect probabilities, measured factory performance, or independently validated predictions.</p><p>Accuracy, precision, recall, F1, confusion matrix, false-alarm rate, model latency, and empirical lead time are not available for this module.</p></div></section>
+      </>
+    )
+  }
   return (
     <>
       <PageIntro eyebrow="MODEL OUTPUT / SYNTHETIC VALIDATION" title="AI analytics" copy="Compare current simulated risk signals with held-out model metrics. These results are not validated against real production data." />
-      <div className="overview-kpis analytics-kpis"><article className="kpi-card"><div className="kpi-heading"><span>Overall risk estimate</span><span className="kpi-icon blue"><Icon name="activity" /></span></div><strong>{risk ? formatPercent(risk.overall_risk) : "—"}</strong><div className="kpi-foot"><span>Primary model: PINN</span></div></article><article className="kpi-card"><div className="kpi-heading"><span>Estimated lead time</span><span className="kpi-icon violet"><Icon name="analytics" /></span></div><strong>{risk ? `${risk.lead_time_estimate_s.toFixed(0)}s` : "—"}</strong><div className="kpi-foot"><span>Heuristic estimate; not empirically measured</span></div></article><article className="kpi-card"><div className="kpi-heading"><span>LSTM live status</span><span className="kpi-icon green"><Icon name="activity" /></span></div><strong className="kpi-text">{risk?.model_comparison?.lstm_status === "active" ? "Active" : "Warming up"}</strong><div className="kpi-foot"><span>Separate live comparator</span></div></article></div>
+      <div className="overview-kpis analytics-kpis"><article className="kpi-card"><div className="kpi-heading"><span>Overall risk estimate</span><span className="kpi-icon blue"><Icon name="activity" /></span></div><strong>{risk ? formatPercent(risk.overall_risk) : "—"}</strong><div className="kpi-foot"><span>Primary model: PINN</span></div></article><article className="kpi-card"><div className="kpi-heading"><span>Estimated lead time</span><span className="kpi-icon violet"><Icon name="analytics" /></span></div><strong>{risk?.lead_time_estimate_s == null ? "—" : `${risk.lead_time_estimate_s.toFixed(0)}s`}</strong><div className="kpi-foot"><span>Heuristic estimate; not empirically measured</span></div></article><article className="kpi-card"><div className="kpi-heading"><span>LSTM live status</span><span className="kpi-icon green"><Icon name="activity" /></span></div><strong className="kpi-text">{risk?.model_comparison?.lstm_status === "active" ? "Active" : "Warming up"}</strong><div className="kpi-foot"><span>Separate live comparator</span></div></article></div>
       <div className="risk-summary-grid">{risk && Object.entries(riskLabels).map(([key, label]) => <RiskCard key={key} label={label} value={risk.risk[key as RiskKey]} />)}</div>
-      <RiskDistributionChart risk={risk?.risk} />
+      <RiskDistributionChart risk={risk?.risk} categories={riskCategories(industry)} />
       <div className="section-heading-row"><div><p className="eyebrow">HELD-OUT MODEL EVALUATION</p><h2>PINN and LSTM comparison</h2></div><span className="tag tag-warning">Synthetic simulator holdout</span></div>
       {metrics ? <><div className="model-grid"><ModelMetricCard name="PINN" metrics={metrics.pinn} /><ModelMetricCard name="LSTM" metrics={metrics.lstm} /></div><ModelComparisonChart pinn={{ mae: metrics.pinn.mae, mse: metrics.pinn.mse }} lstm={{ mae: metrics.lstm.mae, mse: metrics.lstm.mse }} /></> : <div className="card inline-empty">Model metrics are unavailable until the backend finishes evaluation.</div>}
-      <div className="dashboard-two-column"><section className="card"><PanelTitle eyebrow="MODEL NOTES" title="How to interpret this page" /><div className="notice-list"><p><strong>PINN:</strong> the dashboard’s primary model; the code combines data and physics-informed loss terms.</p><p><strong>LSTM:</strong> sequence-based comparison model. Live output waits for a complete input window.</p><p><strong>Evaluation:</strong> MAE and MSE are calculated from synthetic holdout predictions. Classification accuracy, precision, recall, F1, confusion matrix, false-alarm rate and empirical latency are not exposed by this API.</p></div></section><section className="card"><PanelTitle eyebrow="CURRENT LIVE COMPARISON" title="Model output state" /><div className="detail-grid"><div><span>Primary model</span><strong>PINN</strong></div><div><span>PINN risk band</span><strong>{risk?.risk_band ?? "Unavailable"}</strong></div><div><span>LSTM comparator</span><strong>{risk?.model_comparison?.lstm_status ?? "Unavailable"}</strong></div><div><span>Physics residual series</span><strong>Not exposed by API</strong></div></div></section></div>
+      <div className="dashboard-two-column"><section className="card"><PanelTitle eyebrow="MODEL NOTES" title="How to interpret this page" /><div className="notice-list"><p><strong>Physics-Proxy-Guided Neural Network:</strong> the dashboard’s primary model; training combines data loss with a simplified physics-related proxy penalty, not a full PDE-residual PINN.</p><p><strong>LSTM:</strong> sequence-based comparison model. Live output waits for a complete input window.</p><p><strong>Evaluation:</strong> MAE and MSE are calculated from synthetic holdout predictions. Classification accuracy, precision, recall, F1, confusion matrix, false-alarm rate and empirical latency are not exposed by this API.</p></div></section><section className="card"><PanelTitle eyebrow="CURRENT LIVE COMPARISON" title="Model output state" /><div className="detail-grid"><div><span>Primary model</span><strong>Physics-Proxy-Guided NN</strong></div><div><span>Risk band</span><strong>{risk?.risk_band ?? "Unavailable"}</strong></div><div><span>LSTM comparator</span><strong>{risk?.model_comparison?.lstm_status ?? "Unavailable"}</strong></div><div><span>PDE residual series</span><strong>Not exposed by API</strong></div></div></section></div>
     </>
   )
 }
 
 type CurrentSignal = { name: string; risk: number; key: RiskKey }
 export function AlertsPage() {
-  const { dashboard } = usePlantGuard()
+  const { dashboard, industry } = usePlantGuard()
   const [filter, setFilter] = useState("all")
   const [query, setQuery] = useState("")
-  const signals: CurrentSignal[] = dashboard ? (Object.keys(riskLabels) as RiskKey[]).map((key) => ({ name: riskLabels[key], risk: dashboard.risk.risk[key], key })) : []
+  const signals: CurrentSignal[] = dashboard ? riskCategories(industry)
+    .map(({ id, label }) => ({ name: label, risk: dashboard.risk.risk[id], key: id }))
+    .filter((signal) => typeof signal.risk === "number") : []
   const visible = signals.filter((signal) => (filter === "all" || riskBand(signal.risk) === filter) && signal.name.toLowerCase().includes(query.toLowerCase()))
   return (
     <>
@@ -218,7 +267,7 @@ export function AlertsPage() {
       <section className="card">
         <div className="filter-toolbar"><div><p className="eyebrow">LIVE RISK SIGNALS</p><h2>Current defect estimates</h2></div><div className="filter-controls"><label className="search-field"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter defect signals" aria-label="Filter current risk signals" /></label><label className="select-control"><span className="sr-only">Risk level filter</span><select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">All levels</option><option value="high">High</option><option value="moderate">Moderate</option><option value="low">Low</option></select></label></div></div>
         <div className="signal-table">
-          <div className="signal-table-head"><span>Current signal</span><span>Model risk</span><span>Severity band</span><span>Source</span></div>
+          <div className="signal-table-head"><span>Current signal</span><span>Risk score</span><span>Severity band</span><span>Source</span></div>
           {visible.map((signal) => <Link className="signal-row" href="/analytics" key={signal.key}><span><i className={`severity-dot ${riskBand(signal.risk)}`} />{signal.name}</span><strong>{formatPercent(signal.risk)}</strong><StatusTag label={riskBand(signal.risk)} status={riskBand(signal.risk)} /><small>Current simulator output</small></Link>)}
           {!visible.length && <div className="inline-empty">{dashboard ? "No current signals match these filters." : "Risk signals appear when the backend connects."}</div>}
         </div>
@@ -238,20 +287,20 @@ export function AdvisoryPage() {
       <div className="advisory-page-grid">
         <section className="card advisory-detail-card">
           <PanelTitle eyebrow="CURRENT BACKEND RECOMMENDATION" title={advisory ? titleCase(advisory.defect) : "Recommendation unavailable"} aside={advisory && <StatusTag label={advisory.severity} status={riskBand(advisory.risk)} />} />
-          {advisory ? <><div className="advisory-risk-readout"><span>Defect-specific model risk</span><strong>{formatPercent(advisory.risk)}</strong><span>Overall risk: {formatPercent(advisory.overall_risk)}</span></div><div className="recommendation-block"><span>Recommended action</span><strong>{advisory.recommended_action}</strong><p>{advisory.reason}</p></div><div className="detail-grid"><div><span>Target process variable</span><strong>{titleCase(advisory.target_process_variable)}</strong></div><div><span>Suggested adjustment</span><strong>{formatAdjustment(advisory)}</strong></div><div><span>Suggested duration</span><strong>{advisory.duration_s} seconds</strong></div><div><span>Recommendation source</span><strong>Backend advisory engine</strong></div></div></> : <div className="inline-empty">Connect the backend to load its recommendation.</div>}
+          {advisory ? <><div className="advisory-risk-readout"><span>Defect-specific risk score</span><strong>{formatPercent(advisory.risk)}</strong><span>Overall risk: {formatPercent(advisory.overall_risk)}</span></div><div className="recommendation-block"><span>Recommended action</span><strong>{advisory.recommended_action}</strong><p>{advisory.reason}</p></div><div className="detail-grid"><div><span>Target process variable</span><strong>{titleCase(advisory.target_process_variable)}</strong></div><div><span>Suggested adjustment</span><strong>{formatAdjustment(advisory)}</strong></div><div><span>Suggested duration</span><strong>{advisory.duration_s} seconds</strong></div><div><span>Recommendation source</span><strong>{advisory.source ?? "Backend advisory engine"}</strong></div></div></> : <div className="inline-empty">Connect the backend to load its recommendation.</div>}
           <div className="operator-review-note"><span className="review-check">i</span><span><strong>Operator review required</strong><small>Recommendation values are simulated and require independent validation.</small></span></div>
           <button className="button button-primary" type="button" onClick={() => void applyAdvisory()} disabled={!advisory || !mutationAuthorized || busy !== null}>{busy === "advisory" ? "Applying to simulator…" : "Apply correction to simulation"} <Icon name="arrow" /></button>
           {!mutationAuthorized && <p className="fine-print">Operator authorization in <Link href="/settings">Settings</Link> is required to apply simulated corrections.</p>}
         </section>
         <section className="card correction-explainer"><PanelTitle eyebrow="SAFE BOUNDARY" title="Advisory-only action" /><div className="safe-flow"><span className="safe-flow-icon"><Icon name="simulation" /></span><p>This button posts to <code>/api/v1/advisories/apply</code>, which changes only the backend's in-memory simulated process state.</p><p>No PLC, machine controller, or production equipment is addressed by this application.</p></div></section>
       </div>
-      {result && <section className="card correction-result"><PanelTitle eyebrow="BACKEND CORRECTION RESPONSE" title="Simulated before / after" aside={<StatusTag label={result.simulated ? "Simulator only" : "Unverified"} status={result.simulated ? "info" : "warning"} />} /><p className="fine-print">Duration: {result.duration_s}s · {titleCase(result.defect)} · {titleCase(result.target_process_variable)}</p><div className="detail-grid"><div><span>Target sensor value</span><strong>{result.before.sensor_value.toFixed(3)} → {result.after.sensor_value.toFixed(3)}</strong></div><div><span>Defect-specific risk</span><strong>{formatPercent(result.before.defect_risk)} → {formatPercent(result.after.defect_risk)}</strong></div><div><span>Overall model risk</span><strong>{formatPercent(result.before.overall_risk)} → {formatPercent(result.after.overall_risk)}</strong></div></div><p className="fine-print">Risk may not always improve immediately; scenario dynamics continue after a correction.</p></section>}
+      {result && <section className="card correction-result"><PanelTitle eyebrow="BACKEND CORRECTION RESPONSE" title="Simulated before / after" aside={<StatusTag label={result.simulated ? "Simulator only" : "Unverified"} status={result.simulated ? "info" : "warning"} />} /><p className="fine-print">Duration: {result.duration_s}s · {titleCase(result.defect)} · {titleCase(result.target_process_variable)}</p><div className="detail-grid"><div><span>Target sensor value</span><strong>{result.before.sensor_value.toFixed(3)} → {result.after.sensor_value.toFixed(3)}</strong></div><div><span>Defect-specific risk</span><strong>{formatPercent(result.before.defect_risk)} → {formatPercent(result.after.defect_risk)}</strong></div><div><span>Overall risk</span><strong>{formatPercent(result.before.overall_risk)} → {formatPercent(result.after.overall_risk)}</strong></div></div><p className="fine-print">Risk may not always improve immediately; scenario dynamics continue after a correction.</p></section>}
     </>
   )
 }
 
 export function WorkflowsPage() {
-  const { dashboard } = usePlantGuard()
+  const { dashboard, industry } = usePlantGuard()
   return (
     <>
       <PageIntro eyebrow="CONCEPTUAL PROCESS / MANUAL ACTIONS" title="Workflow overview" copy="This diagram describes a possible operator-led sequence. It is not an executed workflow engine or an integration with external plant systems." action={<Link className="button button-secondary" href="/simulation">Open simulation lab <Icon name="arrow" /></Link>} />
@@ -259,7 +308,7 @@ export function WorkflowsPage() {
         <div className="workflow-flow">
           {[
             ["01", "Sensor sample", "Backend simulator state", "complete"],
-            ["02", "Risk evaluation", dashboard ? `PINN estimate · ${formatPercent(dashboard.risk.overall_risk)}` : "Waiting for API", dashboard ? "complete" : "waiting"],
+            ["02", "Risk evaluation", dashboard ? `${industry?.id === "plastic_extrusion" ? "PINN estimate" : "Simulated rule output"} · ${formatPercent(dashboard.risk.overall_risk)}` : "Waiting for API", dashboard ? "complete" : "waiting"],
             ["03", "Advisory generation", dashboard ? titleCase(dashboard.advisory.defect) : "Waiting for API", dashboard ? "complete" : "waiting"],
             ["04", "Operator review", "Manual review is required", "current"],
             ["05", "Simulated adjustment", "Operator-triggered simulator action", "manual"],
@@ -272,21 +321,28 @@ export function WorkflowsPage() {
 }
 
 export function SimulationPage() {
-  const { dashboard, busy, mutationAuthorized, resetScenario, injectDefect, advance } = usePlantGuard()
+  const { dashboard, industry, busy, mutationAuthorized, resetScenario, injectDefect, advance } = usePlantGuard()
   const active = dashboard?.simulation.active_scenario?.type
-  const [defect, setDefect] = useState("surface_cracking")
+  const [defect, setDefect] = useState("")
+  const scenarios = industry?.scenarios ?? scenarioOptions
+  const defects = industry?.defects ?? [
+    { id: "surface_cracking", label: "Surface cracking", note: "" },
+    { id: "warping", label: "Warping", note: "" },
+    { id: "thickness_variation", label: "Thickness variation", note: "" },
+  ]
+  const selectedDefect = defects.some((item) => item.id === defect) ? defect : defects[0]?.id ?? ""
   return (
     <>
-      <PageIntro eyebrow="DIGITAL TWIN / CONTAINED STATE" title="Simulation lab" copy="Select one of the six implemented scenarios and observe backend sensor and risk responses. All commands are advisory demonstration actions only." action={<StatusTag label={active ? titleCase(active) : "Waiting for API"} status={dashboard ? "info" : "offline"} />} />
+      <PageIntro eyebrow="DIGITAL TWIN / CONTAINED STATE" title="Simulation lab" copy={`Select one of ${scenarios.length} ${industry?.name ?? "process"} scenarios and observe backend sensor and risk responses. All commands are advisory demonstration actions only.`} action={<StatusTag label={active ? titleCase(active) : "Waiting for API"} status={dashboard ? "info" : "offline"} />} />
       <section className="card"><PanelTitle eyebrow="SCENARIO SELECTOR" title="Choose process conditions" aside={<span className="fine-print">Selecting a scenario resets its simulator state</span>} /><div className="scenario-cards">
-        {scenarioOptions.map((scenario) => <button className={`scenario-option ${active === scenario.id ? "selected" : ""}`} type="button" key={scenario.id} aria-pressed={active === scenario.id} disabled={!mutationAuthorized || busy !== null} onClick={() => void resetScenario(scenario.id)}><span className="scenario-option-icon"><Icon name={scenario.id === "normal" ? "activity" : "alerts"} /></span><span><strong>{scenario.label}</strong><small>{scenario.note}</small></span><span className={`scenario-radio ${active === scenario.id ? "checked" : ""}`} /></button>)}
+        {scenarios.map((scenario) => <button className={`scenario-option ${active === scenario.id ? "selected" : ""}`} type="button" key={scenario.id} aria-pressed={active === scenario.id} disabled={!mutationAuthorized || busy !== null} onClick={() => void resetScenario(scenario.id)}><span className="scenario-option-icon"><Icon name={scenario.id === "normal" ? "activity" : "alerts"} /></span><span><strong>{scenario.label}</strong><small>{scenario.note}</small></span><span className={`scenario-radio ${active === scenario.id ? "checked" : ""}`} /></button>)}
         {!mutationAuthorized && <p className="fine-print">Authorize as an operator in <Link href="/settings">Settings</Link> to change simulated state.</p>}
       </div></section>
       <div className="dashboard-two-column">
         <section className="card"><PanelTitle eyebrow="ACTIVE PROCESS STATE" title="Current sensor signals" aside={<span className="tag tag-info">{dashboard ? `${dashboard.simulation.time_s.toFixed(0)}s elapsed` : "API pending"}</span>} /><SensorValueCards compact /><div className="simulation-controls"><button className="button button-primary" type="button" disabled={!dashboard || !mutationAuthorized || busy !== null} onClick={() => void advance()}><Icon name="simulation" />{busy === "advance" ? "Advancing…" : "Advance simulation"}</button><p>Advances the simulation by two one-second steps.</p></div></section>
-        <section className="card"><PanelTitle eyebrow="DEFECT INJECTION" title="Apply a simulated disturbance" /><p className="body-copy">Inject a supported defect into the simulator state to observe its sensor and risk response.</p><label className="field-label" htmlFor="defect-select">Defect mode</label><select className="form-select" id="defect-select" value={defect} onChange={(event) => setDefect(event.target.value)}><option value="surface_cracking">Surface cracking</option><option value="warping">Warping</option><option value="thickness_variation">Thickness variation</option></select><button className="button button-secondary" type="button" disabled={!dashboard || !mutationAuthorized || busy !== null} onClick={() => void injectDefect(defect)}>{busy === `defect:${defect}` ? "Injecting…" : "Inject defect into simulation"}</button><p className="fine-print">Defect injection changes only the in-memory simulator.</p></section>
+        <section className="card"><PanelTitle eyebrow="DEFECT INJECTION" title="Apply a simulated disturbance" /><p className="body-copy">Inject a supported {industry?.name ?? "process"} disturbance into its isolated simulator state and observe the sensor and risk response.</p><label className="field-label" htmlFor="defect-select">Defect mode</label><select className="form-select" id="defect-select" value={selectedDefect} onChange={(event) => setDefect(event.target.value)}>{defects.map((item) => <option value={item.id} key={item.id}>{item.label}</option>)}</select><button className="button button-secondary" type="button" disabled={!dashboard || !selectedDefect || !mutationAuthorized || busy !== null} onClick={() => void injectDefect(selectedDefect)}>{busy === `defect:${selectedDefect}` ? "Injecting…" : "Inject defect into simulation"}</button><p className="fine-print">Defect injection changes only the in-memory simulator.</p></section>
       </div>
-      <div className="dashboard-two-column"><SensorTrendChart /><RiskDistributionChart risk={dashboard?.risk.risk} /></div>
+      <div className="dashboard-two-column"><SensorTrendChart /><RiskDistributionChart risk={dashboard?.risk.risk} categories={riskCategories(industry)} /></div>
       <div className="simulation-disclaimer"><strong>Simulation boundary</strong><span>These controls do not connect to or alter physical manufacturing equipment.</span></div>
     </>
   )
@@ -342,9 +398,9 @@ export function RoiPage() {
   )
 }
 
-function downloadSensorCsv(history: Record<string, number | string | null>[]) {
+function downloadSensorCsv(history: Sensor[], sensors: Array<{ key: string }>) {
   if (!history.length) return
-  const columns = ["timestamp_s", ...sensorDefinitions.map(([key]) => key)]
+  const columns = ["timestamp_s", ...sensors.map(({ key }) => key)]
   const rows = [columns, ...history.map((reading) => columns.map((column) => reading[column] ?? ""))]
   const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\r\n")
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }))
@@ -358,13 +414,16 @@ function downloadSensorCsv(history: Record<string, number | string | null>[]) {
 }
 
 export function ReportsPage() {
-  const { dashboard, history, metrics } = usePlantGuard()
+  const { dashboard, history, metrics, industry } = usePlantGuard()
+  const exportSensors = industry?.sensors ?? sensorDefinitions.map(([key]) => ({ key }))
   return (
     <>
       <PageIntro eyebrow="AVAILABLE DATA PRODUCTS" title="Reports & exports" copy="Export data returned by the simulator. No PDF generation, incident archive, or production historian export is currently implemented." />
       <div className="report-export-grid">
-        <article className="card export-card"><span className="export-icon"><Icon name="download" /></span><p className="eyebrow">CSV · SENSOR HISTORY</p><h2>Simulated sensor stream</h2><p>Download the currently loaded sensor history ({history.length} readings) with the simulator timestamp and available process variables.</p><button className="button button-primary" type="button" disabled={!history.length} onClick={() => downloadSensorCsv(history)}>Export sensor CSV <Icon name="arrow" /></button></article>
-        <article className="card export-card"><span className="export-icon violet"><Icon name="analytics" /></span><p className="eyebrow">MODEL EVALUATION</p><h2>Held-out metrics</h2><p>{metrics ? `PINN and LSTM MAE/MSE from a synthetic simulator holdout are available (${metrics.pinn.sample_count ?? "—"} PINN observations).` : "Model evaluation data is not loaded."}</p><Link className="button button-secondary" href="/analytics">View model metrics <Icon name="arrow" /></Link></article>
+        <article className="card export-card"><span className="export-icon"><Icon name="download" /></span><p className="eyebrow">CSV · SENSOR HISTORY</p><h2>{industry?.name ?? "Simulated"} sensor stream</h2><p>Download the currently loaded sensor history ({history.length} readings) with the simulator timestamp and this module's configured process variables.</p><button className="button button-primary" type="button" disabled={!history.length} onClick={() => downloadSensorCsv(history, exportSensors)}>Export sensor CSV <Icon name="arrow" /></button></article>
+        {industry?.id === "plastic_extrusion" || !industry
+          ? <article className="card export-card"><span className="export-icon violet"><Icon name="analytics" /></span><p className="eyebrow">EXTRUSION MODEL EVALUATION</p><h2>Held-out metrics</h2><p>{metrics ? `PINN and LSTM MAE/MSE from a synthetic simulator holdout are available (${metrics.pinn.sample_count ?? "—"} PINN observations).` : "Model evaluation data is not loaded."}</p><Link className="button button-secondary" href="/analytics">View model metrics <Icon name="arrow" /></Link></article>
+          : <article className="card export-card"><span className="export-icon violet"><Icon name="analytics" /></span><p className="eyebrow">INDUSTRY RISK OUTPUT</p><h2>Rule-based estimates</h2><p>{industry.risk_method} Model-evaluation metrics are not available for this module.</p><Link className="button button-secondary" href="/analytics">Review risk scope <Icon name="arrow" /></Link></article>}
       </div>
       <section className="card"><PanelTitle eyebrow="CURRENT SIMULATOR SNAPSHOT" title="Report preview" /><div className="detail-grid"><div><span>Scenario</span><strong>{dashboard?.simulation.active_scenario ? titleCase(dashboard.simulation.active_scenario.type) : "Unavailable"}</strong></div><div><span>Simulation time</span><strong>{dashboard ? `${dashboard.simulation.time_s.toFixed(1)} s` : "—"}</strong></div><div><span>Overall risk</span><strong>{dashboard ? formatPercent(dashboard.risk.overall_risk) : "—"}</strong></div><div><span>Sensor rows ready for export</span><strong>{history.length}</strong></div></div></section>
       <div className="notice-card"><span className="notice-icon"><Icon name="reports" /></span><div><strong>PDF and historical reports are not available</strong><p>No PDF export or server-side report archive exists in the current project. Sensor CSV is generated from the loaded simulated readings in the browser.</p></div></div>
@@ -373,9 +432,11 @@ export function ReportsPage() {
 }
 
 export function IntegrationsPage() {
-  const { online, dashboard, metrics } = usePlantGuard()
+  const { online, dashboard, industry, metrics } = usePlantGuard()
   const endpoints = [
     ["Dashboard & simulator", "GET /api/v1/dashboard", "Implemented"],
+    ["Industry catalog", "GET /api/v1/industries", "Implemented"],
+    ["Industry-specific simulator", "GET /api/v1/industries/{id}/dashboard · POST /api/v1/industries/{id}/simulation/*", "Implemented"],
     ["Sensor history", "GET /api/v1/sensors/history", "Implemented"],
     ["Risk & advisory", "GET /api/v1/risk/latest · /api/v1/advisory/latest", "Implemented"],
     ["Simulation actions", "POST /api/v1/simulation/*", "Implemented"],
@@ -384,7 +445,7 @@ export function IntegrationsPage() {
   ]
   return (
     <>
-      <PageIntro eyebrow="SERVICE BOUNDARIES" title="Integrations & API" copy="Inspect the application API boundary. Only repository endpoints are listed as implemented; third-party and industrial systems are not connected." action={<button className="button button-secondary" type="button" disabled={!getApiBaseUrl()} onClick={() => window.open(`${getApiBaseUrl()}/docs`, "_blank", "noopener,noreferrer")}>Open API docs <Icon name="arrow" /></button>} />
+      <PageIntro eyebrow="SERVICE BOUNDARIES" title="Integrations & API" copy={`Inspect the application API boundary for ${industry?.name ?? "the selected simulator"}. Only repository endpoints are listed as implemented; third-party and industrial systems are not connected.`} action={<button className="button button-secondary" type="button" disabled={!getApiBaseUrl()} onClick={() => window.open(`${getApiBaseUrl()}/docs`, "_blank", "noopener,noreferrer")}>Open API docs <Icon name="arrow" /></button>} />
       <div className="overview-kpis"><article className="kpi-card"><div className="kpi-heading"><span>Backend API</span><span className={`kpi-icon ${online ? "green" : "red"}`}><Icon name="integrations" /></span></div><strong className="kpi-text">{online ? "Reachable" : "Unavailable"}</strong><div className="kpi-foot"><span>Health and dashboard endpoints</span></div></article><article className="kpi-card"><div className="kpi-heading"><span>Simulation service</span><span className="kpi-icon blue"><Icon name="simulation" /></span></div><strong className="kpi-text">{dashboard ? "Active" : "Unknown"}</strong><div className="kpi-foot"><span>In-memory mathematical twin</span></div></article><article className="kpi-card"><div className="kpi-heading"><span>Industrial connectivity</span><span className="kpi-icon violet"><Icon name="assets" /></span></div><strong className="kpi-text">Not configured</strong><div className="kpi-foot"><span>No PLC or plant connection</span></div></article></div>
       <section className="card"><PanelTitle eyebrow="APPLICATION ENDPOINTS" title="Implemented API surface" /><div className="integration-list">{endpoints.map(([name, path, status]) => <div className="integration-row" key={name}><span className="integration-symbol"><Icon name={name.startsWith("External") ? "close" : "integrations"} /></span><span><strong>{name}</strong><small>{path}</small></span><StatusTag label={status} status={status === "Not connected" ? "offline" : "info"} /></div>)}</div></section>
       <div className="notice-card"><span className="notice-icon"><Icon name="settings" /></span><div><strong>Container status is not reported by this UI</strong><p>The app does not have a Docker runtime status API. Container health must be checked through the operator's local Docker tooling.</p></div></div>

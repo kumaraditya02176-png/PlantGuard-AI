@@ -4,27 +4,39 @@ PlantGuard AI is a simulation-only demonstration, not a production deployment. N
 
 ## Operator authentication configuration
 
-The Next.js server requires an operator username, a scrypt password hash, Redis session storage, the exact public origin, an explicit cookie policy, the server-only backend URL, and the backend mutation token. Generate a password verifier interactively (input is not echoed):
+The Next.js server requires an operator username, a scrypt password hash, Redis session storage, the exact public origin, an explicit cookie policy, the server-only backend URL, and the backend mutation token. For the supported local Windows demo, use the repository setup script rather than putting secrets in shell history or a `.env` file:
 
 ```powershell
-node .\scripts\generate_operator_password_hash.mjs
+Set-Location "C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready-phase5-integration"
+.\scripts\setup_local_demo.ps1
 ```
 
-Provide the resulting hash and other values to the process through an approved secret manager or local process environment. Do not put credentials in source control, `.env` files, build arguments, frontend variables, URLs, or logs. The backend mutation token is separate from the operator password.
+The script reads the password without echo, generates its verifier using the existing scrypt helper, creates a cryptographically random mutation token, and stores the values encrypted with Windows DPAPI for the current user. The generated settings file is Git-ignored. The hash and token are decrypted only into the server process environments by the service startup scripts and are not printed.
 
-For **local loopback HTTP only**, set:
+For **local loopback HTTP only**, the loader sets the following supported configuration:
 
 ```powershell
 $env:PLANTGUARD_PUBLIC_ORIGIN = 'http://127.0.0.1:3102'
 $env:PLANTGUARD_AUTH_ENV = 'development'
 $env:PLANTGUARD_COOKIE_SECURE = 'false'
 $env:PLANTGUARD_SESSION_STORE_URL = 'redis://127.0.0.1:6379/0'
+$env:PLANTGUARD_API_URL = 'http://127.0.0.1:8001'
 $env:PLANTGUARD_TRUST_PROXY = 'false'
 ```
 
-Also set `PLANTGUARD_OPERATOR_USERNAME`, `PLANTGUARD_OPERATOR_PASSWORD_HASH`, `PLANTGUARD_MUTATION_TOKEN` (at least 32 characters), and `PLANTGUARD_API_URL` in the server process environment. Start Redis and application services only on ports verified available for the test. Do not use the default Compose ports if they belong to existing services.
+For this Windows demo, `http://127.0.0.1:3102` is the only accepted frontend origin and Host; do not use `localhost` or another port. Next.js may reconstruct its internal `Request.url` using `localhost` even when the browser connected to `127.0.0.1`; authentication therefore validates the browser Origin and incoming Host, and accepts only matching Next.js forwarding headers with plain HTTP. It rejects origin, Host, and forwarded-header mismatches. Re-running setup does not change the environment of processes that are already running. After setup or credential rotation, restart the backend and frontend with the startup scripts so they load the current DPAPI settings. Redis can remain running if its health check succeeds.
 
-For **production configuration**, set `PLANTGUARD_AUTH_ENV=production`, use an HTTPS `PLANTGUARD_PUBLIC_ORIGIN`, `PLANTGUARD_COOKIE_SECURE=true`, an authenticated TLS Redis URL, TLS at a trusted reverse proxy, and secret-manager-provided credentials. If `PLANTGUARD_TRUST_PROXY=true`, the trusted proxy must strip client-provided forwarding headers and set its own `X-Forwarded-For` and `X-Forwarded-Proto`. The production auth route fails closed unless the HTTPS origin and Secure cookie policy agree.
+Start the services in separate PowerShell terminals from the project root, in this order:
+
+```powershell
+.\scripts\start_local_demo_redis.ps1
+.\scripts\start_local_demo_backend.ps1
+.\scripts\start_local_demo_frontend.ps1
+```
+
+Each command belongs in its own terminal so the service remains visible and stoppable through that terminal. Docker Desktop must be running for Redis. Redis is published only on `127.0.0.1:6379`; the scripts do not kill processes or replace an unrelated service when a port is occupied. The frontend script checks Redis and backend health before it starts. Setup and startup scripts fail explicitly when configuration, Docker Engine, a required port, or a service health check is unavailable.
+
+For **production configuration**, set `PLANTGUARD_AUTH_ENV=production`, use an HTTPS `PLANTGUARD_PUBLIC_ORIGIN`, `PLANTGUARD_COOKIE_SECURE=true`, an authenticated TLS Redis URL, TLS at a trusted reverse proxy, and secret-manager-provided credentials. Do not use the local DPAPI configuration for production. If `PLANTGUARD_TRUST_PROXY=true`, the trusted proxy must strip client-provided forwarding headers and set its own `X-Forwarded-For` and `X-Forwarded-Proto`. The production auth route fails closed unless the HTTPS origin and Secure cookie policy agree.
 
 ## Server-side API boundary
 
@@ -55,6 +67,7 @@ For frontend checks:
 Set-Location '.\frontend'
 pnpm install --frozen-lockfile
 pnpm exec tsc --noEmit --incremental false
+node --test tests/auth-origin.mjs
 pnpm build
 ```
 

@@ -723,6 +723,8 @@ def test_frontend_files_and_build_contract():
     assert "authorizeMutations: (username: string, password: string)" in provider_text
     assert "JSON.stringify({ username, password })" in provider_text
     assert "JSON.stringify({ token })" not in provider_text
+    assert "/api/v1/industries" in provider_text
+    assert "Select simulated industry" in shell_text
     assert "HTTP-only" in pages_text
     assert "csrfToken" in provider_text
     assert "x-csrf-token" in proxy_text.lower()
@@ -737,7 +739,8 @@ def test_frontend_files_and_build_contract():
     assert "/api/v1/simulation/inject" in provider_text
     assert "/api/v1/simulation/advance" in provider_text
     assert "/api/v1/advisories/apply" in provider_text
-    assert "Defect-specific model risk" in pages_text
+    assert "Defect-specific risk score" in pages_text
+    assert "deterministic risk rules" in pages_text
     assert "Synthetic simulator holdout" in pages_text
     assert "false-alarm rate" in pages_text
     assert "CSV" in pages_text

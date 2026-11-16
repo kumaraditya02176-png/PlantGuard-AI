@@ -16,6 +16,12 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
 from backend.app.advisory import generate_advisory_for_state
+from backend.app.industries.registry import (
+    EXTRUSION_METADATA,
+    INDUSTRY_SIMULATORS,
+    get_industry_catalog,
+    get_industry_metadata,
+)
 from backend.app.modeling import (
     LSTM_TRAINING_EPOCHS,
     PINN_TRAINING_EPOCHS,
@@ -117,6 +123,24 @@ class AdvancePayload(StrictPayload):
         if self.dt * self.steps > 600.0:
             raise ValueError("dt multiplied by steps must not exceed 600 seconds.")
         return self
+
+
+class IndustryResetPayload(StrictPayload):
+    scenario: str = Field(min_length=1, max_length=64)
+
+    @field_validator("scenario", mode="before")
+    @classmethod
+    def normalize_scenario(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
+
+
+class IndustryInjectPayload(StrictPayload):
+    defect: str = Field(min_length=1, max_length=64)
+
+    @field_validator("defect", mode="before")
+    @classmethod
+    def normalize_defect(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 app = FastAPI(title="PlantGuard AI API", version="0.1.0")
@@ -311,6 +335,24 @@ def mutation_auth_status() -> Dict[str, bool]:
     return {"authorized": True}
 
 
+@app.get("/api/v1/industries")
+def list_industries() -> Dict[str, Any]:
+    return {"industries": get_industry_catalog()}
+
+
+@app.get("/api/v1/industries/{industry_id}/dashboard")
+def get_industry_dashboard(industry_id: str) -> Dict[str, Any]:
+    metadata = get_industry_metadata(industry_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="Industry is not available.")
+    if industry_id == "plastic_extrusion":
+        with _simulation_lock:
+            dashboard = _build_dashboard()
+            dashboard["industry"] = metadata
+            return dashboard
+    return INDUSTRY_SIMULATORS[industry_id].dashboard()
+
+
 @app.get("/api/v1/dashboard")
 def get_dashboard() -> Dict[str, Any]:
     with _simulation_lock:
@@ -427,6 +469,60 @@ def advance_simulation(payload: AdvancePayload = Body(...)) -> Dict[str, Any]:
         for _ in range(payload.steps):
             simulator.advance(payload.dt)
         return _build_dashboard()
+
+
+@app.post("/api/v1/industries/{industry_id}/simulation/reset", dependencies=[Depends(require_mutation_token)])
+def reset_industry_simulation(industry_id: str, payload: IndustryResetPayload = Body(...)) -> Dict[str, Any]:
+    if get_industry_metadata(industry_id) is None:
+        raise HTTPException(status_code=404, detail="Industry is not available.")
+    if industry_id == "plastic_extrusion":
+        if payload.scenario not in SCENARIO_PROFILES:
+            raise HTTPException(status_code=422, detail="Unsupported plastic-extrusion scenario.")
+        dashboard = reset_simulation(ResetPayload(scenario=payload.scenario))
+        dashboard["industry"] = EXTRUSION_METADATA
+        return dashboard
+    try:
+        return INDUSTRY_SIMULATORS[industry_id].reset(payload.scenario)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/v1/industries/{industry_id}/simulation/inject", dependencies=[Depends(require_mutation_token)])
+def inject_industry_defect(industry_id: str, payload: IndustryInjectPayload = Body(...)) -> Dict[str, Any]:
+    if get_industry_metadata(industry_id) is None:
+        raise HTTPException(status_code=404, detail="Industry is not available.")
+    if industry_id == "plastic_extrusion":
+        if payload.defect not in {"surface_cracking", "warping", "thickness_variation"}:
+            raise HTTPException(status_code=422, detail="Unsupported plastic-extrusion defect.")
+        dashboard = inject_defect(InjectPayload(defect=payload.defect))
+        dashboard["industry"] = EXTRUSION_METADATA
+        return dashboard
+    try:
+        return INDUSTRY_SIMULATORS[industry_id].inject_defect(payload.defect)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/v1/industries/{industry_id}/simulation/advance", dependencies=[Depends(require_mutation_token)])
+def advance_industry_simulation(industry_id: str, payload: AdvancePayload = Body(...)) -> Dict[str, Any]:
+    if get_industry_metadata(industry_id) is None:
+        raise HTTPException(status_code=404, detail="Industry is not available.")
+    if industry_id == "plastic_extrusion":
+        dashboard = advance_simulation(payload)
+        dashboard["industry"] = EXTRUSION_METADATA
+        return dashboard
+    return INDUSTRY_SIMULATORS[industry_id].advance(payload.dt, payload.steps)
+
+
+@app.post("/api/v1/industries/{industry_id}/advisories/apply", dependencies=[Depends(require_mutation_token)])
+def apply_industry_advisory(industry_id: str) -> Dict[str, Any]:
+    if get_industry_metadata(industry_id) is None:
+        raise HTTPException(status_code=404, detail="Industry is not available.")
+    if industry_id == "plastic_extrusion":
+        dashboard = apply_advisory()
+        dashboard["industry"] = EXTRUSION_METADATA
+        return dashboard
+    return INDUSTRY_SIMULATORS[industry_id].apply_advisory()
 
 
 @app.get("/api/v1/metrics")

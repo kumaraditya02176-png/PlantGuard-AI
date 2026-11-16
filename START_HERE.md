@@ -1,63 +1,62 @@
-# START HERE
+# Start PlantGuard AI
 
-## Authoritative workspace
-Use only this workspace:
+## Active workspace
 
-C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready
+Use the Phase 5 integration workspace containing `backend`, `frontend`, `docs`, and `scripts`. Do not use a duplicate or older project folder.
 
-Do not use the duplicate workspace in:
-C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready
+```powershell
+Set-Location "C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready-phase5-integration"
+```
 
-## Required Python environment
-Use the workspace-local Python interpreter permanently:
+The required Python interpreter is:
 
+```text
 C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\.venv\Scripts\python.exe
+```
 
-Do not switch to the global Python 3.14 interpreter for this project.
+## Configure authenticated local demo
 
-## Required local URLs
-- Frontend: http://127.0.0.1:3000
-- Backend: http://127.0.0.1:8001
+Run once in an interactive PowerShell terminal. Enter an operator username and a strong password of at least 16 characters when prompted. The password is not echoed; a scrypt verifier and random mutation token are generated without being displayed. Settings are encrypted using Windows DPAPI for the current Windows user and ignored by Git.
 
-## Validate the environment before starting the app
-From the project root:
+```powershell
+.\scripts\setup_local_demo.ps1
+```
 
-cd "C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready"
-$env:PYTHONPATH = "$PWD"
-& "C:/Users/ADITYA/Downloads/PlantGuard-AI-Codex-Ready1.0/.venv/Scripts/python.exe" -c "import torch, numpy, fastapi, uvicorn; print('PLANTGUARD_ENV_OK')"
+To rotate credentials, run the setup script again and confirm by entering `REPLACE`.
 
-Optional preflight script:
+## Start services in separate PowerShell terminals
 
-cd "C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready"
-$env:PYTHONPATH = "$PWD"
-python scripts/validate_startup.py
+Docker Desktop must be installed and running. Start the loopback-only Redis session store first:
 
-## Start backend
-From the project root:
+```powershell
+.\scripts\start_local_demo_redis.ps1
+```
 
-cd "C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready"
-$env:PYTHONPATH = "$PWD"
-& "C:/Users/ADITYA/Downloads/PlantGuard-AI-Codex-Ready1.0/.venv/Scripts/python.exe" -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8001
+Then start the backend in a second terminal:
 
-## Start frontend
-From the project root:
+```powershell
+.\scripts\start_local_demo_backend.ps1
+```
 
-cd "C:\Users\ADITYA\Downloads\PlantGuard-AI-Codex-Ready1.0\PlantGuard-AI-Codex-Ready\frontend"
-npm run dev -- --hostname 127.0.0.1 --port 3000
+Finally, start the frontend in a third terminal:
 
-## Reset the app safely
-1. Stop stale PlantGuard node/python processes that reference this workspace.
-2. Optionally remove stale frontend build cache if the app has been restarting repeatedly:
-   Remove-Item -Recurse -Force .next
-3. Restart backend with the workspace-local venv.
-4. Restart frontend with npm run dev.
+```powershell
+.\scripts\start_local_demo_frontend.ps1
+```
+
+The scripts use the existing ports and do not stop processes to free a port:
+
+- Frontend: `http://127.0.0.1:3102`
+- Backend: `http://127.0.0.1:8001`
+- Redis: `127.0.0.1:6379` (loopback only)
+
+Use `http://127.0.0.1:3102` as the only local frontend origin; do not substitute `localhost`. After changing local authentication settings, restart the backend and frontend so they load the updated DPAPI configuration. Redis can remain running if its health check succeeds.
 
 ## Health checks
-- Backend health: http://127.0.0.1:8001/health
-- Dashboard API: http://127.0.0.1:8001/api/v1/dashboard
-- Frontend: http://127.0.0.1:3000
 
-## Target demo
-Launch -> choose extrusion scenario -> inject defect -> watch sensor drift -> risk rises -> advisory appears -> simulate correction -> risk changes -> compare model outputs -> show illustrative ROI.
+- Backend health: `http://127.0.0.1:8001/health`
+- Backend API documentation: `http://127.0.0.1:8001/docs`
+- Frontend-proxied health: `http://127.0.0.1:3102/api/backend/health`
+- Dashboard: `http://127.0.0.1:3102/overview`
 
-The prototype remains simulation/advisory only and does not directly control real machines.
+The prototype is simulation-only and advisory-only. It does not connect to factory systems or control physical equipment. For test commands and implementation details, see [README.md](README.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
